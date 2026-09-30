@@ -2,6 +2,7 @@ mod file;
 pub mod hands;
 pub mod playback;
 pub mod program_track;
+pub mod score;
 pub mod tempo_track;
 mod track;
 

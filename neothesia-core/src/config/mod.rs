@@ -224,6 +224,14 @@ impl Config {
         self.appearance.background_dim = dim.clamp(0.0, 1.0);
     }
 
+    pub fn sheet_music(&self) -> bool {
+        self.appearance.sheet_music
+    }
+
+    pub fn set_sheet_music(&mut self, sheet_music: bool) {
+        self.appearance.sheet_music = sheet_music;
+    }
+
     pub fn background_blur(&self) -> f32 {
         self.appearance.background_blur
     }

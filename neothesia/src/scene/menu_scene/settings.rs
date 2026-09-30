@@ -221,6 +221,17 @@ impl super::MenuScene {
 
                         spacer(ui);
 
+                        if nuon::settings_row_toggler()
+                            .title("Sheet Music")
+                            .subtitle("Staff above the waterfall (score-like MIDI files)")
+                            .value(ctx.config.sheet_music())
+                            .build(ui, rows)
+                        {
+                            ctx.config.set_sheet_music(!ctx.config.sheet_music());
+                        }
+
+                        spacer(ui);
+
                         let has_background = ctx.config.background_image().is_some();
                         nuon::settings_row()
                             .title("Background Image")

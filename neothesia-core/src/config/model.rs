@@ -189,6 +189,14 @@ pub struct AppearanceConfigV1 {
     /// Blur radius of the background image, in pixels
     #[serde(default = "default_background_blur")]
     pub background_blur: f32,
+
+    /// Show the grand staff above the waterfall (score-like MIDI files only)
+    #[serde(default = "default_sheet_music")]
+    pub sheet_music: bool,
+}
+
+fn default_sheet_music() -> bool {
+    true
 }
 
 fn default_background_dim() -> f32 {
@@ -216,6 +224,7 @@ impl Default for AppearanceConfig {
             background_image: None,
             background_dim: default_background_dim(),
             background_blur: default_background_blur(),
+            sheet_music: default_sheet_music(),
         })
     }
 }

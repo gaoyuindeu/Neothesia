@@ -1,5 +1,5 @@
 use crate::{MidiTrack, program_track::ProgramTrack, tempo_track::TempoTrack};
-use midly::{Format, Smf, Timing};
+use midly::{Format, MetaMessage, Smf, Timing, TrackEventKind};
 use std::{fs, path::Path, sync::Arc};
 
 #[derive(Debug, Clone)]
@@ -10,6 +10,62 @@ pub struct MidiFile {
     pub program_track: ProgramTrack,
     pub tempo_track: TempoTrack,
     pub measures: Arc<[std::time::Duration]>,
+
+    /// Ticks (pulses) per quarter note
+    pub ppq: u16,
+    pub time_signatures: Arc<[TimeSignature]>,
+    pub key_signatures: Arc<[KeySignature]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeSignature {
+    pub tick: u64,
+    pub numerator: u8,
+    pub denominator: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeySignature {
+    pub tick: u64,
+    /// Positive: number of sharps, negative: number of flats
+    pub sharps: i8,
+    pub minor: bool,
+}
+
+/// Collect time and key signature changes from all tracks, sorted by tick
+fn signatures(smf: &Smf<'_>) -> (Vec<TimeSignature>, Vec<KeySignature>) {
+    let mut time = Vec::new();
+    let mut key = Vec::new();
+
+    for track in smf.tracks.iter() {
+        let mut tick = 0u64;
+        for event in track {
+            tick += event.delta.as_int() as u64;
+            match event.kind {
+                TrackEventKind::Meta(MetaMessage::TimeSignature(num, denom_pow, _, _)) => {
+                    time.push(TimeSignature {
+                        tick,
+                        numerator: num,
+                        denominator: 1u8.checked_shl(denom_pow as u32).unwrap_or(4),
+                    });
+                }
+                TrackEventKind::Meta(MetaMessage::KeySignature(sharps, minor)) => {
+                    key.push(KeySignature {
+                        tick,
+                        sharps,
+                        minor,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    time.sort_by_key(|t| t.tick);
+    time.dedup_by_key(|t| t.tick);
+    key.sort_by_key(|k| k.tick);
+    key.dedup_by_key(|k| k.tick);
+    (time, key)
 }
 
 impl MidiFile {
@@ -94,6 +150,7 @@ impl MidiFile {
         };
 
         let program_track = ProgramTrack::new(&tracks);
+        let (time_signatures, key_signatures) = signatures(smf);
 
         Ok(Self {
             name,
@@ -102,6 +159,9 @@ impl MidiFile {
             program_track,
             tempo_track,
             measures: measures.into(),
+            ppq: u_per_quarter_note,
+            time_signatures: time_signatures.into(),
+            key_signatures: key_signatures.into(),
         })
     }
 }

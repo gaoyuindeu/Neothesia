@@ -24,6 +24,9 @@ pub struct MidiNote {
     pub start: Duration,
     pub end: Duration,
     pub duration: Duration,
+    /// Position in MIDI ticks (pulses), as written in the file
+    pub start_tick: u64,
+    pub end_tick: u64,
     pub note: u8,
     pub velocity: u8,
     pub channel: u8,
@@ -84,6 +87,7 @@ struct NoteInfo {
     velocity: u8,
     channel: u8,
     timestamp: Duration,
+    pulses: u64,
 }
 
 #[derive(Default)]
@@ -102,6 +106,7 @@ impl EventsBuilder {
         channel: u4,
         message: &MidiMessage,
         timestamp: Duration,
+        pulses: u64,
         track_id: usize,
         track_color_id: usize,
     ) {
@@ -122,6 +127,8 @@ impl EventsBuilder {
                 start,
                 end,
                 duration,
+                start_tick: active.pulses,
+                end_tick: pulses,
                 note: key,
                 velocity: active.velocity,
                 channel: active.channel,
@@ -137,6 +144,7 @@ impl EventsBuilder {
                 channel: channel.as_int(),
                 velocity,
                 timestamp,
+                pulses,
             };
             self.active_notes.insert(key, note);
         }
@@ -155,6 +163,7 @@ impl EventsBuilder {
         channel: u4,
         message: MidiMessage,
         timestamp: Duration,
+        pulses: u64,
         track_id: usize,
         track_color_id: usize,
     ) -> MidiEvent {
@@ -179,7 +188,14 @@ impl EventsBuilder {
             message => message,
         };
 
-        self.build_notes(channel, &message, timestamp, track_id, track_color_id);
+        self.build_notes(
+            channel,
+            &message,
+            timestamp,
+            pulses,
+            track_id,
+            track_color_id,
+        );
 
         MidiEvent {
             channel: channel.as_int(),
@@ -207,7 +223,14 @@ fn build(
             match event.kind {
                 TrackEventKind::Midi { channel, message } => {
                     let timestamp = tempo_track.pulses_to_duration(pulses);
-                    Some(builder.on_event(channel, message, timestamp, track_id, track_color_id))
+                    Some(builder.on_event(
+                        channel,
+                        message,
+                        timestamp,
+                        pulses,
+                        track_id,
+                        track_color_id,
+                    ))
                 }
                 _ => None,
             }

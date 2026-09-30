@@ -307,7 +307,7 @@ impl TopBar {
                 nuon::translate().y(5.0).add_to_current(ui);
 
                 nuon::quad()
-                    .size(width, 154.0)
+                    .size(width, 208.0)
                     .color([37, 35, 42])
                     .border_radius([10.0, 0.0, 0.0, 10.0])
                     .build(ui);
@@ -324,6 +324,15 @@ impl TopBar {
                             {
                                 ctx.config
                                     .set_chord_identifier(!ctx.config.chord_identifier());
+                            }
+
+                            if nuon::settings_row_toggler()
+                                .title("Sheet Music")
+                                .subtitle("Staff above the waterfall")
+                                .value(ctx.config.sheet_music())
+                                .build(ui, rows)
+                            {
+                                ctx.config.set_sheet_music(!ctx.config.sheet_music());
                             }
 
                             if nuon::settings_row_toggler()

@@ -1,6 +1,7 @@
 use midi_file::midly::MidiMessage;
 use neothesia_core::render::{
-    Backdrop, FxKey, FxRenderer, GuidelineRenderer, NoteLabels, QuadRenderer, TextRenderer,
+    Backdrop, FxKey, FxRenderer, GuidelineRenderer, NoteLabels, QuadRenderer, SheetColors,
+    SheetRenderer, TextRenderer,
 };
 use std::time::Duration;
 use winit::{
@@ -50,6 +51,9 @@ pub struct PlayingScene {
     quad_renderer_fg: QuadRenderer,
     fx: Option<FxRenderer>,
     backdrop: Backdrop,
+    /// None when the song is not score-like (e.g. a recorded performance)
+    sheet: Option<SheetRenderer>,
+    show_sheet: bool,
     toast_manager: ToastManager,
 
     nuon: nuon::Ui,
@@ -120,6 +124,36 @@ impl PlayingScene {
             )
         });
 
+        let sheet = {
+            let score = midi_file::score::Score::new(&player.song().file);
+            log::info!(
+                "Sheet music: grid alignment {:.2}, readable {}",
+                score.grid_alignment,
+                score.is_readable()
+            );
+            let hand_color = |hand: midi_file::Hand| {
+                let schema = ctx.config.color_schema();
+                let (r, g, b) = schema[hand.color_id() % schema.len()].base;
+                [r, g, b]
+            };
+            score.is_readable().then(|| {
+                SheetRenderer::new(
+                    score,
+                    ctx.quad_renderer_factory.new_renderer(),
+                    ctx.text_renderer_factory.new_renderer(),
+                    SheetColors {
+                        background: [0.008, 0.008, 0.016, 1.0],
+                        ink: [225, 225, 235],
+                        played: [120, 120, 135],
+                        hands: [
+                            hand_color(midi_file::Hand::Right),
+                            hand_color(midi_file::Hand::Left),
+                        ],
+                    },
+                )
+            })
+        };
+
         let backdrop = Backdrop::new(
             &ctx.gpu,
             ctx.config.background_image(),
@@ -143,6 +177,8 @@ impl PlayingScene {
             quad_renderer_fg,
             fx,
             backdrop,
+            sheet,
+            show_sheet: true,
             toast_manager: ToastManager::default(),
 
             nuon: nuon::Ui::new(),
@@ -269,6 +305,23 @@ impl Scene for PlayingScene {
         }
 
         self.update_fx(delta);
+        self.show_sheet = ctx.config.sheet_music();
+        if let Some(sheet) = self.sheet.as_mut().filter(|_| ctx.config.sheet_music()) {
+            let song_time = self.player.time().saturating_sub(*self.player.leed_in());
+            let logical = ctx.window_state.logical_size;
+            let staff_space = (logical.height * 0.012).clamp(8.0, 14.0);
+            sheet.update(
+                song_time,
+                (
+                    0.0,
+                    0.0,
+                    logical.width,
+                    SheetRenderer::height_for(staff_space),
+                ),
+                ctx.window_state.physical_size,
+                ctx.window_state.scale_factor as f32,
+            );
+        }
         let size = ctx.window_state.physical_size;
         self.backdrop
             .update(delta, (size.width as f32, size.height as f32));
@@ -326,6 +379,10 @@ impl Scene for PlayingScene {
             fx.render(rpass);
         }
         self.text_renderer.render(rpass);
+
+        if let Some(sheet) = self.sheet.as_ref().filter(|_| self.show_sheet) {
+            sheet.render(rpass);
+        }
 
         self.nuon_renderer.render(rpass);
     }

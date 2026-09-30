@@ -10,7 +10,7 @@ use neothesia_core::{
     piano_layout,
     render::{
         Backdrop, FxKey, FxRenderer, GuidelineRenderer, KeyboardRenderer, QuadRendererFactory,
-        TextRendererFactory, WaterfallRenderer,
+        SheetColors, SheetRenderer, TextRendererFactory, WaterfallRenderer,
     },
 };
 use wgpu_jumpstart::{Gpu, TransformUniform, Uniform, wgpu};
@@ -83,6 +83,27 @@ fn main() {
         config.background_dim(),
         config.background_blur(),
     );
+
+    let score = midi_file::score::Score::new(&midi);
+    println!(
+        "score: alignment {:.2}, readable {}",
+        score.grid_alignment,
+        score.is_readable()
+    );
+    let text_factory = TextRendererFactory::new(&gpu);
+    let mut sheet = score.is_readable().then(|| {
+        SheetRenderer::new(
+            score,
+            quads.new_renderer(),
+            text_factory.new_renderer(),
+            SheetColors {
+                background: [0.008, 0.008, 0.016, 1.0],
+                ink: [225, 225, 235],
+                played: [120, 120, 135],
+                hands: [[90, 255, 140], [110, 190, 255]],
+            },
+        )
+    });
 
     let mut playback = midi_file::PlaybackState::new(LEAD_IN, midi.tracks.clone());
 
@@ -166,6 +187,15 @@ fn main() {
         quad_fg.prepare();
         fx.prepare();
         text.update(neothesia_core::dpi::PhysicalSize::new(WIDTH, HEIGHT), 1.0);
+        if let Some(sheet) = sheet.as_mut() {
+            let song_time = playback.time().saturating_sub(*playback.leed_in());
+            sheet.update(
+                song_time,
+                (0.0, 0.0, WIDTH as f32, SheetRenderer::height_for(13.0)),
+                neothesia_core::dpi::PhysicalSize::new(WIDTH, HEIGHT),
+                1.0,
+            );
+        }
 
         {
             let rpass = gpu.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -191,6 +221,9 @@ fn main() {
             quad_fg.render(&mut rpass);
             fx.render(&mut rpass);
             text.render(&mut rpass);
+            if let Some(sheet) = sheet.as_ref() {
+                sheet.render(&mut rpass);
+            }
         }
 
         let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
