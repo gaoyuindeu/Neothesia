@@ -76,9 +76,33 @@ impl MidiFile {
         if crate::musicxml::is_musicxml(path.as_ref()) {
             return crate::musicxml::load(path.as_ref());
         }
+        let midi = Self::load_midi(path.as_ref())?;
 
+        // A score next to the recording: notation and hands come from it
+        if let Some(score_path) = crate::align::find_score_for(path.as_ref())
+            && let Ok(score) = crate::musicxml::load(&score_path)
+        {
+            let (midi, matched) = crate::align::attach_score(midi, &score);
+            if let Some(matched) = matched {
+                log::info!(
+                    "Score {} matched {:.0}% of its notes{}",
+                    score_path.display(),
+                    matched * 100.0,
+                    if midi.score.is_some() {
+                        ""
+                    } else {
+                        ", not used"
+                    }
+                );
+            }
+            return Ok(midi);
+        }
+        Ok(midi)
+    }
+
+    /// Only the MIDI file, without looking for a score next to it
+    pub fn load_midi(path: &Path) -> Result<Self, String> {
         let name = path
-            .as_ref()
             .file_name()
             .ok_or(String::from("File not found"))?
             .to_string_lossy()

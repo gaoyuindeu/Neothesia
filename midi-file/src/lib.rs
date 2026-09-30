@@ -1,3 +1,4 @@
+pub mod align;
 mod file;
 pub mod hands;
 pub mod musicxml;

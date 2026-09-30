@@ -361,7 +361,65 @@ fn split_track(track: &MidiTrack) -> (MidiTrack, MidiTrack) {
     let mut notes: Vec<MidiNote> = track.notes.to_vec();
     notes.sort_by_key(|n| (n.start, n.note));
     let hands = classify(&notes);
+    split_track_with(track, notes, hands)
+}
 
+/// Merge all note tracks and split them again with the hand `hand_of` gives each note
+/// (notes it doesn't know go by pitch). Other tracks are kept.
+pub(crate) fn split_by(
+    tracks: Vec<MidiTrack>,
+    hand_of: impl Fn(&MidiNote) -> Option<Hand>,
+) -> Vec<MidiTrack> {
+    let note_tracks: Vec<usize> = (0..tracks.len())
+        .filter(|&i| is_note_track(&tracks[i]))
+        .collect();
+    let Some(&first) = note_tracks.first() else {
+        return tracks;
+    };
+
+    // One track with everything that sounds
+    let mut notes: Vec<MidiNote> = note_tracks
+        .iter()
+        .flat_map(|&i| tracks[i].notes.iter().cloned())
+        .collect();
+    notes.sort_by_key(|n| (n.start, n.note));
+    let mut events: Vec<MidiEvent> = note_tracks
+        .iter()
+        .flat_map(|&i| tracks[i].events.iter().cloned())
+        .collect();
+    events.sort_by_key(|e| e.timestamp);
+    let merged = MidiTrack {
+        notes: notes.clone().into(),
+        events: events.into(),
+        ..tracks[first].clone()
+    };
+
+    let hands: Vec<Hand> = notes
+        .iter()
+        .map(|n| hand_of(n).unwrap_or(if n.note < 60 { Hand::Left } else { Hand::Right }))
+        .collect();
+    let (left, right) = split_track_with(&merged, notes, hands);
+
+    let mut out = Vec::with_capacity(tracks.len() + 1);
+    for (i, track) in tracks.into_iter().enumerate() {
+        if i == first {
+            let id = out.len();
+            out.push(retag(left.clone(), id, None, Some(Hand::Left)));
+            out.push(retag(right.clone(), id + 1, None, Some(Hand::Right)));
+        } else if !note_tracks.contains(&i) {
+            let id = out.len();
+            out.push(retag(track, id, None, None));
+        }
+    }
+    out
+}
+
+/// Split a track by a hand per note (`notes` sorted by start, `hands` in the same order)
+fn split_track_with(
+    track: &MidiTrack,
+    notes: Vec<MidiNote>,
+    hands: Vec<Hand>,
+) -> (MidiTrack, MidiTrack) {
     let by_onset: HashMap<(u8, Duration), Hand> = notes
         .iter()
         .zip(hands.iter())

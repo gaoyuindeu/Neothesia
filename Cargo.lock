@@ -1550,6 +1550,7 @@ dependencies = [
 name = "midi-file"
 version = "0.1.0"
 dependencies = [
+ "log",
  "midi-io",
  "midly",
  "roxmltree 0.21.1",
