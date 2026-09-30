@@ -2075,7 +2075,14 @@ mod tests {
 
         let metrics = Metrics::default();
         let mut out = Vec::new();
-        key_signature(&mut out, 0.0, -2, Some(1), &metrics);
+        key_signature(
+            &mut out,
+            0.0,
+            -2,
+            Some(1),
+            [Clef::Treble, Clef::Bass],
+            &metrics,
+        );
         let naturals = out
             .iter()
             .filter(|e| matches!(e, Element::Glyph { c, .. } if *c == glyphs::NATURAL))
