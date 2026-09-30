@@ -177,48 +177,65 @@ impl TopBar {
 
     fn panel_center(_this: &mut PlayingScene, ctx: &mut Context, ui: &mut nuon::Ui) {
         let win_w = ctx.window_state.logical_size.width;
-        let pill_w = 45.0 * 2.0;
+        let button_w = 35.0;
+        let label_w = 60.0;
+        let pill_w = button_w * 2.0 + label_w;
+
+        let speed = ctx.config.speed_multiplier();
 
         nuon::translate()
             .x(win_w / 2.0 - pill_w / 2.0)
             .y(5.0)
             .build(ui, |ui| {
                 if nuon::button()
-                    .size(45.0, 20.0)
+                    .size(button_w, 20.0)
                     .color([67, 67, 67])
                     .hover_color([87, 87, 87])
                     .preseed_color([97, 97, 97])
                     .border_radius([10.0, 0.0, 0.0, 10.0])
                     .icon(icons::minus_icon())
-                    .text_justify(nuon::TextAlign::Start)
                     .build(ui)
                 {
-                    ctx.config
-                        .set_speed_multiplier(ctx.config.speed_multiplier() - 0.1);
+                    ctx.config.set_speed_multiplier((speed - 0.05).max(0.05));
                 }
 
+                // Clicking the percentage cycles through common practice speeds
+                let presets = nuon::click_area("SpeedPresets")
+                    .x(button_w)
+                    .size(label_w, 20.0)
+                    .build(ui);
+                if presets.is_clicked() {
+                    ctx.config.set_speed_multiplier(next_speed_preset(speed));
+                }
+
+                nuon::quad()
+                    .x(button_w)
+                    .size(label_w, 20.0)
+                    .color(if presets.is_hovered() || presets.is_pressed() {
+                        [87, 87, 87]
+                    } else {
+                        [67, 67, 67]
+                    })
+                    .build(ui);
+
                 nuon::label()
-                    .text(format!(
-                        "{}%",
-                        (ctx.config.speed_multiplier() * 100.0).round()
-                    ))
+                    .text(format!("{}%", (speed * 100.0).round()))
                     .bold(true)
-                    .size(45.0 * 2.0, 20.0)
+                    .x(button_w)
+                    .size(label_w, 20.0)
                     .build(ui);
 
                 if nuon::button()
-                    .size(45.0, 20.0)
-                    .x(45.0)
+                    .size(button_w, 20.0)
+                    .x(button_w + label_w)
                     .color([67, 67, 67])
                     .hover_color([87, 87, 87])
                     .preseed_color([97, 97, 97])
                     .border_radius([0.0, 10.0, 10.0, 0.0])
                     .icon(icons::plus_icon())
-                    .text_justify(nuon::TextAlign::End)
                     .build(ui)
                 {
-                    ctx.config
-                        .set_speed_multiplier(ctx.config.speed_multiplier() + 0.1);
+                    ctx.config.set_speed_multiplier(speed + 0.05);
                 }
             });
     }
@@ -265,7 +282,12 @@ impl TopBar {
                     })
                     .build(ui)
                 {
-                    this.player.pause_resume();
+                    if this.step_controller.is_enabled() {
+                        this.step_controller.set_enabled(false, &mut this.player);
+                        this.player.resume();
+                    } else {
+                        this.player.pause_resume();
+                    }
                 }
             });
     }
@@ -285,7 +307,7 @@ impl TopBar {
                 nuon::translate().y(5.0).add_to_current(ui);
 
                 nuon::quad()
-                    .size(width, 100.0)
+                    .size(width, 154.0)
                     .color([37, 35, 42])
                     .border_radius([10.0, 0.0, 0.0, 10.0])
                     .build(ui);
@@ -302,6 +324,16 @@ impl TopBar {
                             {
                                 ctx.config
                                     .set_chord_identifier(!ctx.config.chord_identifier());
+                            }
+
+                            if nuon::settings_row_toggler()
+                                .title("Step Mode (Tab)")
+                                .subtitle("\u{2192} next note, \u{2190} previous")
+                                .value(this.step_controller.is_enabled())
+                                .build(ui, rows)
+                            {
+                                this.step_controller.toggle(&mut this.player);
+                                this.keyboard.reset_notes();
                             }
                         },
                     );
@@ -467,4 +499,14 @@ impl TopBar {
                 .build(ui);
         }
     }
+}
+
+const SPEED_PRESETS: [f32; 5] = [0.25, 0.5, 0.75, 1.0, 1.25];
+
+/// The next preset above `speed`, wrapping around to the slowest one
+fn next_speed_preset(speed: f32) -> f32 {
+    SPEED_PRESETS
+        .into_iter()
+        .find(|&preset| preset > speed + 0.001)
+        .unwrap_or(SPEED_PRESETS[0])
 }

@@ -130,6 +130,17 @@ impl MidiPlayer {
         self.play_along.clear();
     }
 
+    /// Advance a paused player by `delta` without silencing notes that are still sounding
+    pub fn step_update(&mut self, delta: Duration) -> Vec<midi_file::MidiEvent> {
+        let was_paused = self.playback.is_paused();
+        self.playback.resume();
+        let events: Vec<_> = self.update(delta).into_iter().cloned().collect();
+        if was_paused {
+            self.playback.pause();
+        }
+        events
+    }
+
     fn send_midi_programs_for_timestamp(&self, time: &Duration) {
         for (&channel, &p) in self.song.file.program_track.program_for_timestamp(time) {
             self.output.midi_event(

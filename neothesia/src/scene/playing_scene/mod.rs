@@ -25,6 +25,9 @@ use midi_player::MidiPlayer;
 mod rewind_controller;
 use rewind_controller::RewindController;
 
+mod step_controller;
+use step_controller::StepController;
+
 mod toast_manager;
 use toast_manager::ToastManager;
 
@@ -42,6 +45,7 @@ pub struct PlayingScene {
 
     player: MidiPlayer,
     rewind_controller: RewindController,
+    step_controller: StepController,
     quad_renderer_bg: QuadRenderer,
     quad_renderer_fg: QuadRenderer,
     glow: Option<GlowRenderer>,
@@ -102,6 +106,8 @@ impl PlayingScene {
         );
         waterfall.update(player.time_without_lead_in());
 
+        let step_controller = StepController::new(player.song(), *player.leed_in());
+
         let quad_renderer_bg = ctx.quad_renderer_factory.new_renderer();
         let quad_renderer_fg = ctx.quad_renderer_factory.new_renderer();
 
@@ -121,6 +127,7 @@ impl PlayingScene {
             waterfall,
             player,
             rewind_controller: RewindController::new(),
+            step_controller,
             quad_renderer_bg,
             quad_renderer_fg,
             glow,
@@ -184,10 +191,18 @@ impl PlayingScene {
         {
             self.player.set_time(self.top_bar.loop_start_timestamp());
             self.keyboard.reset_notes();
+            self.step_controller.cancel_glide();
         }
 
-        if self.player.play_along().are_required_keys_pressed() {
-            let delta = (delta / 10) * (ctx.config.speed_multiplier() * 10.0) as u32;
+        if self.step_controller.is_enabled() {
+            let advance = self.step_controller.update(&self.player, delta);
+            if !advance.is_zero() {
+                let midi_events = self.player.step_update(advance);
+                let midi_events: Vec<_> = midi_events.iter().collect();
+                self.keyboard.file_midi_events(&ctx.config, &midi_events);
+            }
+        } else if self.player.play_along().are_required_keys_pressed() {
+            let delta = delta.mul_f32(ctx.config.speed_multiplier());
             let midi_events = self.player.update(delta);
             self.keyboard.file_midi_events(&ctx.config, &midi_events);
         }
@@ -300,10 +315,32 @@ impl Scene for PlayingScene {
     }
 
     fn window_event(&mut self, ctx: &mut Context, event: &WindowEvent) {
-        self.rewind_controller
-            .handle_window_event(ctx, event, &mut self.player);
+        if event.key_pressed(Key::Named(NamedKey::Tab)) {
+            self.step_controller.toggle(&mut self.player);
+            self.keyboard.reset_notes();
+            self.toast_manager
+                .toast(if self.step_controller.is_enabled() {
+                    "Step Mode: \u{2192} next, \u{2190} previous"
+                } else {
+                    "Step Mode: off"
+                });
+        }
+
+        let step_before = self.player.time();
+        if self
+            .step_controller
+            .handle_window_event(event, &mut self.player)
+        {
+            if self.player.time() < step_before {
+                self.keyboard.reset_notes();
+            }
+        } else {
+            self.rewind_controller
+                .handle_window_event(ctx, event, &mut self.player);
+        }
 
         if self.rewind_controller.is_rewinding() {
+            self.step_controller.cancel_glide();
             self.keyboard.reset_notes();
         }
 
@@ -314,7 +351,13 @@ impl Scene for PlayingScene {
         }
 
         if event.key_released(Key::Named(NamedKey::Space)) {
-            self.player.pause_resume();
+            if self.step_controller.is_enabled() {
+                self.step_controller.set_enabled(false, &mut self.player);
+                self.toast_manager.toast("Step Mode: off");
+                self.player.resume();
+            } else {
+                self.player.pause_resume();
+            }
         }
 
         handle_settings_input(ctx, &mut self.toast_manager, &mut self.waterfall, event);
@@ -359,7 +402,7 @@ fn handle_settings_input(
                 .set_speed_multiplier(ctx.config.speed_multiplier() + amount);
         } else {
             ctx.config
-                .set_speed_multiplier(ctx.config.speed_multiplier() - amount);
+                .set_speed_multiplier((ctx.config.speed_multiplier() - amount).max(0.05));
         }
 
         toast_manager.speed_toast(ctx.config.speed_multiplier());
