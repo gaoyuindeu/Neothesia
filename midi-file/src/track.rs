@@ -7,6 +7,8 @@ use crate::{hands::Hand, tempo_track::TempoTrack};
 pub struct MidiEvent {
     pub channel: u8,
     pub timestamp: Duration,
+    /// Position in MIDI ticks (pulses), as written in the file
+    pub tick: u64,
     pub message: MidiMessage,
     pub track_id: usize,
     pub track_color_id: usize,
@@ -200,6 +202,7 @@ impl EventsBuilder {
         MidiEvent {
             channel: channel.as_int(),
             timestamp,
+            tick: pulses,
             message,
             track_id,
             track_color_id,
