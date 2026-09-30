@@ -4,7 +4,7 @@
 use std::{cmp::Reverse, collections::HashMap};
 
 use super::{
-    Accidental, Beam, Event, Measure, NoteValue, PedalSpan, STAVES, ScoreNote, StaffMeasure,
+    Accidental, Beam, Clef, Event, Measure, NoteValue, PedalSpan, STAVES, ScoreNote, StaffMeasure,
     Tuplet, Voice,
     analysis::{Grace, Meter, Note, Span, TupletBeat},
 };
@@ -230,6 +230,7 @@ fn build_voice(
     ppq: u16,
     tuplet_beats: &[TupletBeat],
     primary: bool,
+    clef: Clef,
 ) -> Option<Voice> {
     let (ms, me) = (m.start, m.end());
 
@@ -253,9 +254,8 @@ fn build_voice(
                 tuplet: None,
                 notes: Vec::new(),
                 whole_measure_rest: true,
-                ottava: 0,
-                staccato: false,
-                grace: Vec::new(),
+                clef,
+                ..Default::default()
             }],
             ..Default::default()
         });
@@ -332,6 +332,7 @@ fn build_voice(
                                 tie_from_prev: i > 0 || chunk.tie_from_prev,
                                 tie_to_next: i + 1 < count || chunk.tie_to_next,
                                 trill: note.trill && i == 0 && !chunk.tie_from_prev,
+                                ..Default::default()
                             }
                         })
                         .collect()
@@ -349,10 +350,9 @@ fn build_voice(
                 dots: piece.dots,
                 tuplet: None,
                 notes,
-                whole_measure_rest: false,
-                ottava: 0,
                 staccato,
-                grace: Vec::new(),
+                clef,
+                ..Default::default()
             });
             tuplet_of_event.push(piece.tuplet);
         }
@@ -375,6 +375,7 @@ fn build_voice(
             tuplets.push(Tuplet {
                 actual: if sextuplet { 6 } else { 3 },
                 normal: if sextuplet { 4 } else { 2 },
+                bracket: None,
                 first: i,
                 last: j,
             });
@@ -614,7 +615,11 @@ pub(super) fn build(
         .map(|(index, m)| {
             let previous = index.checked_sub(1).map(|i| meters[i]);
             let staves = [0, 1].map(|staff| {
-                let mut staff_measure = StaffMeasure::default();
+                let clef = Clef::for_staff(staff);
+                let mut staff_measure = StaffMeasure {
+                    clef,
+                    ..Default::default()
+                };
                 // The upper part becomes the first voice (stems up, with rests)
                 let order = if upper_is_second(&voices[staff], m, notes) {
                     [1, 0]
@@ -629,6 +634,7 @@ pub(super) fn build(
                         ppq,
                         &tuplet_beats[staff],
                         rank == 0,
+                        clef,
                     ) {
                         staff_measure.voices.push(voice);
                     }
@@ -661,6 +667,11 @@ pub(super) fn build(
                 time_signature_changed: previous.is_some_and(|p| (p.num, p.den) != (m.num, m.den)),
                 staves,
                 pedal,
+                number: (index + 1).to_string(),
+                repeat_start: false,
+                repeat_end: false,
+                ending: None,
+                directions: Vec::new(),
             }
         })
         .collect();
@@ -707,6 +718,7 @@ pub(super) fn attach_graces(measures: &mut [Measure], notes: &[Note], graces: &[
             tie_from_prev: false,
             tie_to_next: false,
             trill: false,
+            ..Default::default()
         });
     }
 }

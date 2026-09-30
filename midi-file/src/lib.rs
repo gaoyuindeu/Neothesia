@@ -1,5 +1,6 @@
 mod file;
 pub mod hands;
+pub mod musicxml;
 pub mod playback;
 pub mod program_track;
 pub mod score;

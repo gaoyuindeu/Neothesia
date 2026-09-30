@@ -343,6 +343,18 @@ pub fn assign_hands(tracks: Vec<MidiTrack>) -> Vec<MidiTrack> {
     out
 }
 
+/// Give tracks explicit hands (by track index); tracks with None keep their colors
+pub(crate) fn set_hands(tracks: Vec<MidiTrack>, hands: &[Option<Hand>]) -> Vec<MidiTrack> {
+    tracks
+        .into_iter()
+        .enumerate()
+        .map(|(i, track)| {
+            let hand = hands.get(i).copied().flatten();
+            retag(track, i, None, hand)
+        })
+        .collect()
+}
+
 /// Split one track into (left, right) tracks. Non-note events go to both, so that
 /// e.g. the sustain pedal still works when one hand is muted.
 fn split_track(track: &MidiTrack) -> (MidiTrack, MidiTrack) {

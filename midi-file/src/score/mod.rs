@@ -34,11 +34,65 @@ impl StaffKind {
 
 pub const STAVES: [StaffKind; 2] = [StaffKind::Treble, StaffKind::Bass];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Clef {
+    #[default]
+    Treble,
+    Bass,
+    /// C clef on the middle line
+    Alto,
+    /// C clef on the fourth line
+    Tenor,
+    /// Treble clef sounding an octave lower / higher (8 below / above the clef)
+    Treble8vb,
+    Treble8va,
+    Bass8vb,
+}
+
+impl Clef {
+    /// Diatonic step (C0 = 0) of the note on the bottom staff line
+    pub fn bottom_line_step(self) -> i32 {
+        match self {
+            Clef::Treble => 4 * 7 + 2,
+            Clef::Treble8vb => 3 * 7 + 2,
+            Clef::Treble8va => 5 * 7 + 2,
+            Clef::Bass => 2 * 7 + 4,
+            Clef::Bass8vb => 7 + 4,
+            Clef::Alto => 3 * 7 + 3,
+            Clef::Tenor => 2 * 7 + 1,
+        }
+    }
+
+    pub fn for_staff(staff: usize) -> Self {
+        if staff == 0 { Clef::Treble } else { Clef::Bass }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Articulation {
+    Accent,
+    Tenuto,
+    Marcato,
+    Staccatissimo,
+    Fermata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ornament {
+    Trill,
+    Turn,
+    InvertedTurn,
+    Mordent,
+    InvertedMordent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum NoteValue {
+    SixtyFourth,
     ThirtySecond,
     Sixteenth,
     Eighth,
+    #[default]
     Quarter,
     Half,
     Whole,
@@ -54,21 +108,22 @@ impl NoteValue {
         NoteValue::ThirtySecond,
     ];
 
-    /// Length in 32nd notes
-    fn thirty_seconds(self) -> u64 {
+    /// Length in 64th notes
+    fn sixty_fourths(self) -> u64 {
         match self {
-            NoteValue::ThirtySecond => 1,
-            NoteValue::Sixteenth => 2,
-            NoteValue::Eighth => 4,
-            NoteValue::Quarter => 8,
-            NoteValue::Half => 16,
-            NoteValue::Whole => 32,
+            NoteValue::SixtyFourth => 1,
+            NoteValue::ThirtySecond => 2,
+            NoteValue::Sixteenth => 4,
+            NoteValue::Eighth => 8,
+            NoteValue::Quarter => 16,
+            NoteValue::Half => 32,
+            NoteValue::Whole => 64,
         }
     }
 
     /// Length in ticks, with `dots` augmentation dots (each adds half of the previous)
     pub fn ticks(self, ppq: u16, dots: u8) -> u64 {
-        let base = self.thirty_seconds() * ppq as u64 / 8;
+        let base = self.sixty_fourths() * ppq as u64 / 16;
         let mut total = base;
         let mut add = base;
         for _ in 0..dots {
@@ -88,6 +143,7 @@ impl NoteValue {
             NoteValue::Eighth => 1,
             NoteValue::Sixteenth => 2,
             NoteValue::ThirtySecond => 3,
+            NoteValue::SixtyFourth => 4,
             _ => 0,
         }
     }
@@ -126,9 +182,11 @@ pub enum Accidental {
     Sharp,
     Flat,
     Natural,
+    DoubleSharp,
+    DoubleFlat,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScoreNote {
     pub pitch: u8,
     /// Diatonic step, C0 = 0, C4 = 28
@@ -146,9 +204,10 @@ pub struct ScoreNote {
     pub tie_to_next: bool,
     /// Trilled (the ornament is shown on the first event of the note)
     pub trill: bool,
+    pub fingering: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Event {
     pub tick: u64,
     /// Real length in ticks
@@ -166,6 +225,14 @@ pub struct Event {
     pub staccato: bool,
     /// Grace notes written small before this chord
     pub grace: Vec<ScoreNote>,
+    /// Clef in effect for this event
+    pub clef: Clef,
+    /// Stem direction given by the score (true: up); computed when None
+    pub stem: Option<bool>,
+    pub articulations: Vec<Articulation>,
+    pub ornament: Option<Ornament>,
+    /// Rolled chord (wavy line before it)
+    pub arpeggio: bool,
 }
 
 impl Event {
@@ -179,6 +246,8 @@ pub struct Tuplet {
     /// e.g. 3 notes in the time of 2
     pub actual: u8,
     pub normal: u8,
+    /// Draw a bracket (None: only when not beamed)
+    pub bracket: Option<bool>,
     /// Event index range (inclusive) in the voice
     pub first: usize,
     pub last: usize,
@@ -200,8 +269,60 @@ pub struct Voice {
 
 #[derive(Debug, Clone, Default)]
 pub struct StaffMeasure {
-    /// One voice, or two when the staff has independent parts (upper voice first)
+    /// One voice, or more when the staff has independent parts (upper voice first;
+    /// with several voices, even ones have stems up, odd ones down)
     pub voices: Vec<Voice>,
+    /// Clef at the start of the measure
+    pub clef: Clef,
+    /// Clef changes inside the measure: (tick, new clef)
+    pub clef_changes: Vec<(u64, Clef)>,
+}
+
+/// Marks attached to a point in time
+#[derive(Debug, Clone, PartialEq)]
+pub enum DirectionKind {
+    /// "p", "mf", "sfz", ...
+    Dynamic(String),
+    Words {
+        text: String,
+        italic: bool,
+        bold: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Direction {
+    pub tick: u64,
+    pub staff: usize,
+    pub above: bool,
+    pub kind: DirectionKind,
+}
+
+/// Points at an event: measure, staff, voice and event index
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EventRef {
+    pub measure: usize,
+    pub staff: usize,
+    pub voice: usize,
+    pub event: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slur {
+    pub start: EventRef,
+    pub end: EventRef,
+    /// Curve above the notes (None: decide from the stems)
+    pub above: Option<bool>,
+}
+
+/// Crescendo / diminuendo hairpin, (measure, tick) at both ends
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wedge {
+    pub staff: usize,
+    pub start: (usize, u64),
+    pub end: (usize, u64),
+    pub crescendo: bool,
+    pub above: bool,
 }
 
 /// Sustain pedal held from `start` to `end` (ticks), clipped to a measure
@@ -232,6 +353,13 @@ pub struct Measure {
     /// Treble and bass staff
     pub staves: [StaffMeasure; 2],
     pub pedal: Vec<PedalSpan>,
+    /// Number shown on the score
+    pub number: String,
+    pub repeat_start: bool,
+    pub repeat_end: bool,
+    /// Volta ending label ("1.", "2.") when the measure starts one
+    pub ending: Option<String>,
+    pub directions: Vec<Direction>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +369,8 @@ pub struct Score {
     /// Fraction of note onsets that sit on a 16th / triplet grid.
     /// Performance recordings score low and should not be shown as notation.
     pub grid_alignment: f32,
+    pub slurs: Vec<Slur>,
+    pub wedges: Vec<Wedge>,
 }
 
 /// Minimum `grid_alignment` for the notation to be worth showing
@@ -248,6 +378,10 @@ pub const MIN_GRID_ALIGNMENT: f32 = 0.65;
 
 impl Score {
     pub fn new(file: &MidiFile) -> Self {
+        // Scores read from notation files come with their own notation
+        if let Some(score) = &file.score {
+            return (**score).clone();
+        }
         let ppq = file.ppq.max(1);
         let (mut notes, graces, grid_alignment) = analysis::collect(file, ppq);
         let last_tick = notes.iter().map(|n| n.raw_end).max().unwrap_or(0);
@@ -268,6 +402,8 @@ impl Score {
             ppq,
             measures,
             grid_alignment,
+            slurs: Vec::new(),
+            wedges: Vec::new(),
         }
     }
 

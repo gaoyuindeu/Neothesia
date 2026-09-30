@@ -6,6 +6,8 @@ edition.workspace = true
 
 [dependencies]
 midly.workspace = true
+roxmltree.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 midi-io.workspace = true

@@ -48,6 +48,8 @@ lilt = "0.8"
 winit = "0.30"
 dpi = "0.1"
 rfd = "0.17"
+roxmltree = "0.21"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 cpal = "0.18"
 fluidlite = { version = "0.2", features = ["builtin"] }

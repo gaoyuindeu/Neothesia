@@ -15,6 +15,9 @@ pub struct MidiFile {
     pub ppq: u16,
     pub time_signatures: Arc<[TimeSignature]>,
     pub key_signatures: Arc<[KeySignature]>,
+
+    /// Notation read from a score file (MusicXML); None for plain MIDI
+    pub score: Option<Arc<crate::score::Score>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +73,10 @@ fn signatures(smf: &Smf<'_>) -> (Vec<TimeSignature>, Vec<KeySignature>) {
 
 impl MidiFile {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        if crate::musicxml::is_musicxml(path.as_ref()) {
+            return crate::musicxml::load(path.as_ref());
+        }
+
         let name = path
             .as_ref()
             .file_name()
@@ -94,7 +101,16 @@ impl MidiFile {
         Self::from_parsed_smf(name.into(), smf)
     }
 
+    /// Like `from_smf`, but keeps the tracks as they are (no hand splitting)
+    pub(crate) fn from_smf_unsplit(name: String, smf: &Smf<'_>) -> Result<Self, String> {
+        Self::build(name, smf, false)
+    }
+
     fn from_parsed_smf(name: String, smf: &Smf<'_>) -> Result<Self, String> {
+        Self::build(name, smf, true)
+    }
+
+    fn build(name: String, smf: &Smf<'_>, split_hands: bool) -> Result<Self, String> {
         let u_per_quarter_note: u16 = match smf.header.timing {
             Timing::Metrical(t) => t.as_int(),
             Timing::Timecode(_fps, _u) => {
@@ -124,7 +140,11 @@ impl MidiFile {
             })
             .collect();
 
-        let tracks = crate::hands::assign_hands(tracks);
+        let tracks = if split_hands {
+            crate::hands::assign_hands(tracks)
+        } else {
+            tracks
+        };
 
         let measures = {
             let last_note_end = tracks
@@ -162,6 +182,7 @@ impl MidiFile {
             ppq: u_per_quarter_note,
             time_signatures: time_signatures.into(),
             key_signatures: key_signatures.into(),
+            score: None,
         })
     }
 }
