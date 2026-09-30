@@ -734,6 +734,8 @@ pub fn build(raw: RawScore, name: String) -> Result<MidiFile, String> {
     // Octave shifts per staff: (start, stop, +1 for 8va / -1 for 8vb)
     let mut ottavas: [Vec<(u64, u64, i8)>; 2] = [Vec::new(), Vec::new()];
     let mut open_shift: HashMap<(usize, u32), (u64, i8)> = HashMap::new();
+    // Some exports lose the start marks; then the file's 8va can't be trusted
+    let mut unmatched_stops = 0;
     let mut shift_marks: Vec<&PlacedDirection> = directions
         .iter()
         .filter(|d| matches!(d.kind, RawDirectionKind::OctaveShift(..)))
@@ -754,6 +756,8 @@ pub fn build(raw: RawScore, name: String) -> Result<MidiFile, String> {
                 _ => {
                     if let Some((start, dir)) = open_shift.remove(&(d.staff, *number)) {
                         ottavas[d.staff].push((start, d.tick, dir));
+                    } else {
+                        unmatched_stops += 1;
                     }
                 }
             }
@@ -1074,6 +1078,19 @@ pub fn build(raw: RawScore, name: String) -> Result<MidiFile, String> {
                 }
             }
         }
+    }
+
+    if unmatched_stops > 0 {
+        for measure in measures.iter_mut() {
+            for staff in measure.staves.iter_mut() {
+                for voice in staff.voices.iter_mut() {
+                    for event in voice.events.iter_mut() {
+                        event.ottava = 0;
+                    }
+                }
+            }
+        }
+        crate::score::auto_ottava(&mut measures);
     }
 
     file.score = Some(Arc::new(Score {

@@ -480,10 +480,9 @@ fn accidentals(staff: &mut StaffMeasure, key: i8) {
 
 /// Write very high treble (very low bass) passages an octave closer, marked 8va/8vb.
 /// Decided per beamed group, so a line doesn't flicker on and off note by note.
-fn ottava(measures: &mut [Measure]) {
+pub(crate) fn ottava(measures: &mut [Measure]) {
     for measure in measures.iter_mut() {
-        for (staff, kind) in STAVES.iter().enumerate() {
-            let bottom = kind.bottom_line_step();
+        for staff in 0..STAVES.len() {
             for voice in measure.staves[staff].voices.iter_mut() {
                 let mut segments: Vec<(usize, usize)> = Vec::new();
                 let mut i = 0;
@@ -501,7 +500,10 @@ fn ottava(measures: &mut [Measure]) {
                 for &(a, b) in &segments {
                     let positions: Vec<i32> = voice.events[a..=b]
                         .iter()
-                        .flat_map(|e| e.notes.iter().map(|n| n.step - bottom))
+                        .flat_map(|e| {
+                            let bottom = e.clef.bottom_line_step();
+                            e.notes.iter().map(move |n| n.step - bottom)
+                        })
                         .collect();
                     let (Some(&low), Some(&high)) =
                         (positions.iter().min(), positions.iter().max())
@@ -522,6 +524,7 @@ fn ottava(measures: &mut [Measure]) {
                 // Bridge single notes and rests between two 8va segments when they fit
                 for k in 1..flags.len().saturating_sub(1) {
                     if flags[k] == 0 && flags[k - 1] != 0 && flags[k - 1] == flags[k + 1] {
+                        let bottom = voice.events[k].clef.bottom_line_step();
                         let fits = voice.events[k].notes.iter().all(|n| {
                             let p = n.step - bottom - 7 * flags[k - 1] as i32;
                             (-6..=14).contains(&p)

@@ -16,6 +16,11 @@ use crate::{Hand, MidiFile};
 
 pub use notation::spell;
 
+/// Mark very high / low passages as 8va / 8vb automatically
+pub fn auto_ottava(measures: &mut [Measure]) {
+    notation::ottava(measures);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StaffKind {
     Treble,

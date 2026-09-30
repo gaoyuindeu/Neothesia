@@ -206,24 +206,28 @@ impl SheetRenderer {
             .map_or(self.score.measures.len() - 1, |h| h.0);
         let mut header = Vec::new();
         let clef_x = 1.8;
-        header.push(Element::Glyph {
-            c: glyphs::G_CLEF,
-            x: clef_x,
-            y: engrave::pos_y(0, 2),
-            size: 1.0,
-            ink: Ink::Plain,
-        });
-        header.push(Element::Glyph {
-            c: glyphs::F_CLEF,
-            x: clef_x,
-            y: engrave::pos_y(1, 6),
-            size: 1.0,
-            ink: Ink::Plain,
-        });
         let measure = &self.score.measures[header_measure];
+        let header_clefs = [measure.staves[0].clef, measure.staves[1].clef];
+        for (staff, clef) in header_clefs.iter().enumerate() {
+            let (c, line) = glyphs::clef(*clef);
+            header.push(Element::Glyph {
+                c,
+                x: clef_x,
+                y: engrave::pos_y(staff, line),
+                size: 1.0,
+                ink: Ink::Plain,
+            });
+        }
         let (header_key, header_time) = (measure.key, measure.time_signature);
         let mut hx = clef_x + self.metrics.clef + 0.8;
-        hx += engrave::key_signature(&mut header, hx, measure.key, None, &self.metrics);
+        hx += engrave::key_signature(
+            &mut header,
+            hx,
+            measure.key,
+            None,
+            header_clefs,
+            &self.metrics,
+        );
         if measure.index == 0 || measure.time_signature_changed {
             engrave::time_signature(&mut header, hx, measure.time_signature, &self.metrics);
         }
@@ -255,6 +259,10 @@ impl SheetRenderer {
                         time: (measure.time_signature != header_time
                             || measure.time_signature_changed)
                             .then_some(measure.time_signature),
+                        clefs: [0, 1].map(|s| {
+                            let clef = measure.staves[s].clef;
+                            (clef != header_clefs[s]).then_some(clef)
+                        }),
                     },
                     _ => Signature::changes(measure),
                 };
@@ -465,6 +473,63 @@ impl Canvas<'_> {
                     x += 1.0;
                 }
             }
+            Element::Wiggle { x, y0, y1, ink } => {
+                let color = self.color(ink);
+                let (top, bottom) = (py(y0), py(y1));
+                let step = self.pixel;
+                let mut y = top;
+                while y < bottom {
+                    let phase = (y - top) / (0.9 * s) * std::f32::consts::TAU;
+                    let offset = 0.22 * s * phase.sin();
+                    self.rect(
+                        px(x) + offset,
+                        y,
+                        (0.16 * s).max(self.pixel),
+                        step * 1.3,
+                        color,
+                    );
+                    y += step;
+                }
+            }
+            Element::Slur {
+                x0,
+                y0,
+                x1,
+                y1,
+                height,
+                ink,
+            } => {
+                let color = self.color(ink);
+                let (a, b) = (px(x0), px(x1));
+                let step = self.pixel;
+                let mut x = a;
+                while x < b {
+                    let u = (x - a + step / 2.0) / (b - a);
+                    let center = y0 + (y1 - y0) * u + height * 4.0 * u * (1.0 - u);
+                    let thickness = 0.05 + 0.13 * (std::f32::consts::PI * u).sin();
+                    self.rect(
+                        x,
+                        py(center - thickness / 2.0),
+                        step * 1.3,
+                        (thickness * s).max(self.pixel),
+                        color,
+                    );
+                    x += step;
+                }
+            }
+            Element::Text {
+                ref text,
+                x,
+                y,
+                size,
+                italic: _,
+                bold,
+                ink,
+            } => {
+                let color = self.color(ink);
+                let (buffer, baseline) = self.glyphs.text(text, size * s, bold, color);
+                self.text.queue_buffer(px(x), py(y) - baseline, buffer);
+            }
         }
     }
 }
@@ -502,9 +567,41 @@ fn measure_metrics(glyphs: &mut GlyphCache) -> Metrics {
 #[derive(Default)]
 struct GlyphCache {
     buffers: HashMap<(char, [u8; 3], u32), (glyphon::Buffer, f32)>,
+    texts: HashMap<(String, u32, bool, [u8; 3]), (glyphon::Buffer, f32)>,
 }
 
 impl GlyphCache {
+    /// Text in the regular UI font; returns the buffer and its baseline offset
+    fn text(
+        &mut self,
+        text: &str,
+        size: f32,
+        bold: bool,
+        color: [u8; 3],
+    ) -> (glyphon::Buffer, f32) {
+        let key = (text.to_string(), size.to_bits(), bold, color);
+        if let Some(entry) = self.texts.get(&key) {
+            return entry.clone();
+        }
+        if self.texts.len() > 512 {
+            self.texts.clear();
+        }
+        let mut attrs = glyphon::Attrs::new()
+            .family(glyphon::Family::Name("Roboto"))
+            .color(glyphon::Color::rgb(color[0], color[1], color[2]));
+        if bold {
+            attrs = attrs.weight(glyphon::Weight::BOLD);
+        }
+        let buffer = TextRenderer::gen_buffer_with_attr(size, text, attrs);
+        let baseline = buffer
+            .layout_runs()
+            .next()
+            .map(|run| run.line_y)
+            .unwrap_or(size);
+        self.texts.insert(key, (buffer.clone(), baseline));
+        (buffer, baseline)
+    }
+
     /// Returns the buffer and the distance from its top to the glyph baseline
     fn get(&mut self, c: char, size: f32, color: [u8; 3]) -> (glyphon::Buffer, f32) {
         let key = (c, color, size.to_bits());

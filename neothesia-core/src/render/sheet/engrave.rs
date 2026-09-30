@@ -7,7 +7,7 @@ use std::{collections::HashMap, time::Duration};
 
 use midi_file::{
     Hand,
-    score::{Accidental, Event, Measure, NoteValue, STAVES, Score, Voice},
+    score::{Accidental, Articulation, Clef, Event, Measure, NoteValue, Ornament, Score, Voice},
 };
 
 use super::glyphs::{self, Metrics};
@@ -29,6 +29,11 @@ const GRACE_SCALE: f32 = 0.65;
 const GRACE_SPACING: f32 = 1.6;
 /// Beam groups whose notes span more than this (in spaces) get stems in both directions
 const MIXED_BEAM_RANGE: f32 = 6.0;
+/// Clefs inside the score are drawn smaller
+const CHANGE_CLEF_SCALE: f32 = 0.75;
+/// Room before notes preceded by a clef change or an arpeggio sign
+const CLEF_CHANGE_ROOM: f32 = 2.6;
+const ARPEGGIO_ROOM: f32 = 1.1;
 /// Keep symbols this far inside the panel
 const PANEL_MARGIN: f32 = 1.0;
 
@@ -93,6 +98,27 @@ pub enum Element {
     },
     /// Dashed horizontal line
     Dashes { x0: f32, x1: f32, y: f32, ink: Ink },
+    /// Vertical wavy line (rolled chord)
+    Wiggle { x: f32, y0: f32, y1: f32, ink: Ink },
+    /// Curve from (x0, y0) to (x1, y1) bulging by `height` (negative: upwards)
+    Slur {
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        height: f32,
+        ink: Ink,
+    },
+    /// Plain text, `size` is the font height in spaces, `y` the baseline
+    Text {
+        text: String,
+        x: f32,
+        y: f32,
+        size: f32,
+        italic: bool,
+        bold: bool,
+        ink: Ink,
+    },
 }
 
 /// Natural spacing of a measure
@@ -147,8 +173,8 @@ fn head_width(value: NoteValue, metrics: &Metrics) -> f32 {
 }
 
 /// Staff positions of the notes (lowest first), with the 8va/8vb shift applied
-fn positions(event: &Event, staff: usize) -> Vec<i32> {
-    let bottom = STAVES[staff].bottom_line_step();
+fn positions(event: &Event, _staff: usize) -> Vec<i32> {
+    let bottom = event.clef.bottom_line_step();
     event
         .notes
         .iter()
@@ -188,6 +214,8 @@ fn accidental_glyph(accidental: Accidental) -> char {
         Accidental::Sharp => glyphs::SHARP,
         Accidental::Flat => glyphs::FLAT,
         Accidental::Natural => glyphs::NATURAL,
+        Accidental::DoubleSharp => glyphs::DOUBLE_SHARP,
+        Accidental::DoubleFlat => glyphs::DOUBLE_FLAT,
     }
 }
 
@@ -225,15 +253,23 @@ fn cancelled_count(previous: i8, key: i8) -> u8 {
     }
 }
 
+/// How far (in positions) a key signature pattern written for the treble clef moves
+/// for another clef: the bass pattern sits two positions lower, the alto one lower
+fn key_shift(clef: Clef) -> i32 {
+    let d = Clef::Treble.bottom_line_step() - clef.bottom_line_step();
+    d - 7 * ((d as f32 / 7.0).round() as i32)
+}
+
 /// Key signature on both staves starting at x
 pub fn key_signature(
     out: &mut Vec<Element>,
     x: f32,
     key: i8,
     previous: Option<i8>,
+    clefs: [Clef; 2],
     metrics: &Metrics,
 ) -> f32 {
-    // Positions above the treble bottom line; the bass uses the same pattern 2 lower
+    // Positions on a treble staff
     const SHARPS: [i32; 7] = [8, 5, 9, 6, 3, 7, 4];
     const FLATS: [i32; 7] = [4, 7, 3, 6, 2, 5, 1];
 
@@ -251,7 +287,7 @@ pub fn key_signature(
                 out.push(Element::Glyph {
                     c: glyphs::NATURAL,
                     x: cx,
-                    y: pos_y(staff, pos - 2 * staff as i32),
+                    y: pos_y(staff, pos + key_shift(clefs[staff])),
                     size: 1.0,
                     ink: Ink::Plain,
                 });
@@ -270,7 +306,7 @@ pub fn key_signature(
             out.push(Element::Glyph {
                 c: symbol,
                 x: cx,
-                y: pos_y(staff, pos - 2 * staff as i32),
+                y: pos_y(staff, pos + key_shift(clefs[staff])),
                 size: 1.0,
                 ink: Ink::Plain,
             });
@@ -312,6 +348,8 @@ pub fn time_signature(out: &mut Vec<Element>, x: f32, time: (u8, u8), metrics: &
 pub struct Signature {
     pub key: Option<(i8, Option<i8>)>,
     pub time: Option<(u8, u8)>,
+    /// Clefs to show at the start (when they differ from what the reader last saw)
+    pub clefs: [Option<Clef>; 2],
 }
 
 impl Signature {
@@ -322,6 +360,7 @@ impl Signature {
             time: measure
                 .time_signature_changed
                 .then_some(measure.time_signature),
+            clefs: [None, None],
         }
     }
 
@@ -332,7 +371,12 @@ impl Signature {
         let time = self
             .time
             .map_or(0.0, |time| time_signature_width(time, metrics));
-        key + time
+        let clef = if self.clefs.iter().any(Option::is_some) {
+            metrics.clef * CHANGE_CLEF_SCALE + 0.6
+        } else {
+            0.0
+        };
+        key + time + clef
     }
 }
 
@@ -361,7 +405,7 @@ fn is_beamed(voice: &Voice, event: &Event) -> bool {
 
 pub fn plan(score: &Score, index: usize, metrics: &Metrics, signature: Signature) -> MeasurePlan {
     let measure = &score.measures[index];
-    let lead = 1.0 + signature.width(metrics);
+    let lead = 1.0 + signature.width(metrics) + if measure.repeat_start { 1.6 } else { 0.0 };
 
     let mut ticks: Vec<u64> = events_at(measure).map(|(_, _, e, _)| e.tick).collect();
     ticks.sort_unstable();
@@ -394,12 +438,24 @@ pub fn plan(score: &Score, index: usize, metrics: &Metrics, signature: Signature
             if event.value.flags() > 0 && !is_beamed(voice, event) {
                 right += metrics.flag * 0.8;
             }
+            if event.arpeggio {
+                left += ARPEGGIO_ROOM;
+            }
         }
         if event.dots > 0 {
             right += 0.35 + event.dots as f32 * 0.5;
         }
         column.left = column.left.max(left);
         column.right = column.right.max(right);
+    }
+
+    // Clef changes need room before the first column at or after them
+    for staff in &measure.staves {
+        for &(tick, _) in &staff.clef_changes {
+            if let Some(c) = columns.iter_mut().find(|c| c.tick >= tick) {
+                c.left += CLEF_CHANGE_ROOM;
+            }
+        }
     }
 
     for i in 0..columns.len() {
@@ -415,7 +471,7 @@ pub fn plan(score: &Score, index: usize, metrics: &Metrics, signature: Signature
         for i in 0..columns.len() {
             x += advance(&columns, i, metrics, 0.0);
         }
-        x + 0.5
+        x + 0.5 + if measure.repeat_end { 1.2 } else { 0.0 }
     };
 
     MeasurePlan {
@@ -435,6 +491,7 @@ fn advance(columns: &[Column], i: usize, metrics: &Metrics, stretch: f32) -> f32
     c.space.max(needed) + stretch * c.space
 }
 
+#[derive(Clone)]
 struct Chord {
     /// x of the note heads (undisplaced)
     x: f32,
@@ -503,20 +560,88 @@ pub fn engrave(
     }
     ticks.push((measure.end_tick, width));
 
-    // Key / time changes at the start
+    let start_clefs = [measure.staves[0].clef, measure.staves[1].clef];
+
+    // Repeat start: thick and thin line with dots
+    let mut x = 0.6;
+    if measure.repeat_start {
+        repeat_sign(&mut out, 0.0, true);
+        x += 1.6;
+    }
+
+    // Clef / key / time changes at the start
     {
-        let mut x = 0.6;
+        if options.signature.clefs.iter().any(Option::is_some) {
+            for (staff, clef) in options.signature.clefs.iter().enumerate() {
+                if let Some(clef) = clef {
+                    let (c, line) = glyphs::clef(*clef);
+                    out.push(Element::Glyph {
+                        c,
+                        x,
+                        y: pos_y(staff, line),
+                        size: CHANGE_CLEF_SCALE,
+                        ink: Ink::Plain,
+                    });
+                }
+            }
+            x += metrics.clef * CHANGE_CLEF_SCALE + 0.6;
+        }
         if let Some((key, previous)) = options.signature.key {
-            x += key_signature(&mut out, x, key, previous, metrics);
+            x += key_signature(&mut out, x, key, previous, start_clefs, metrics);
         }
         if let Some(time) = options.signature.time {
             time_signature(&mut out, x, time, metrics);
         }
     }
 
+    // Clef changes inside the measure, just before the notes they apply to
+    for (staff, staff_measure) in measure.staves.iter().enumerate() {
+        for &(tick, clef) in &staff_measure.clef_changes {
+            let Some(i) = plan.columns.iter().position(|c| c.tick >= tick) else {
+                continue;
+            };
+            let (c, line) = glyphs::clef(clef);
+            out.push(Element::Glyph {
+                c,
+                x: column_x[i] - plan.columns[i].left + 0.2,
+                y: pos_y(staff, line),
+                size: CHANGE_CLEF_SCALE,
+                ink: Ink::Plain,
+            });
+        }
+    }
+
+    // Volta bracket
+    if let Some(label) = &measure.ending {
+        let y = staff_top(0) - 3.0;
+        out.push(Element::Rect {
+            x: 0.3,
+            y,
+            w: width - 0.8,
+            h: 0.12,
+            ink: Ink::Plain,
+        });
+        out.push(Element::Rect {
+            x: 0.3,
+            y,
+            w: 0.12,
+            h: 1.4,
+            ink: Ink::Plain,
+        });
+        out.push(Element::Text {
+            text: label.clone(),
+            x: 0.7,
+            y: y + 1.3,
+            size: 1.3,
+            italic: false,
+            bold: false,
+            ink: Ink::Plain,
+        });
+    }
+
     // Measure number
     if options.first_in_half {
-        let number = (measure.index + 1).to_string();
+        let number = measure.number.clone();
         for (i, d) in number.chars().filter_map(|c| c.to_digit(10)).enumerate() {
             out.push(Element::Glyph {
                 c: glyphs::time_sig_digit(d),
@@ -528,16 +653,29 @@ pub fn engrave(
         }
     }
 
+    // Chord geometry of every voice, for slurs
+    let mut geometry: [Vec<Vec<Option<Chord>>>; 2] = [Vec::new(), Vec::new()];
     for staff in 0..2 {
         let voices = &measure.staves[staff].voices;
         for (v, voice) in voices.iter().enumerate() {
-            let forced = (voices.len() == 2).then_some(v == 0);
-            let other = (voices.len() == 2).then(|| &voices[1 - v]);
-            engrave_voice(
-                &mut out, voice, other, staff, v, forced, &x_of, width, metrics, options,
+            // With several voices, even ones point up, odd ones down
+            let forced = (voices.len() >= 2).then_some(v % 2 == 0);
+            let others: Vec<&Voice> = voices
+                .iter()
+                .enumerate()
+                .filter(|(o, _)| *o != v)
+                .map(|(_, other)| other)
+                .collect();
+            let chords = engrave_voice(
+                &mut out, voice, &others, staff, v, forced, &x_of, width, metrics, options,
             );
+            geometry[staff].push(chords);
         }
     }
+
+    slurs(&mut out, score, index, &geometry, width);
+    wedges(&mut out, score, index, &ticks, width);
+    directions(&mut out, measure, &ticks);
 
     let lowest = out
         .iter()
@@ -549,6 +687,9 @@ pub fn engrave(
             } => y0.max(y1) + thickness,
             Element::Tie { y, height, .. } => y + height.max(0.0),
             Element::Dashes { y, .. } => y + 0.3,
+            Element::Wiggle { y1, .. } => y1,
+            Element::Slur { y0, y1, height, .. } => y0.max(y1) + height.max(0.0),
+            Element::Text { y, .. } => y + 0.4,
         })
         .fold(STAFF_BOTTOM[1], f32::max);
     let pedal_y = (lowest + 1.3)
@@ -559,7 +700,9 @@ pub fn engrave(
     // Barline
     let top = staff_top(0);
     let bottom = STAFF_BOTTOM[1];
-    if options.last_measure {
+    if measure.repeat_end {
+        repeat_sign(&mut out, width, false);
+    } else if options.last_measure {
         out.push(Element::Rect {
             x: width - 1.0,
             y: top,
@@ -594,7 +737,7 @@ pub fn engrave(
 fn engrave_voice(
     out: &mut Vec<Element>,
     voice: &Voice,
-    other: Option<&Voice>,
+    others: &[&Voice],
     staff: usize,
     v: usize,
     forced_up: Option<bool>,
@@ -602,26 +745,47 @@ fn engrave_voice(
     width: f32,
     metrics: &Metrics,
     options: Options,
-) {
-    // Stem direction: fixed with two voices, per beam group or per chord otherwise
+) -> Vec<Option<Chord>> {
+    // Stem direction: as written in the score, fixed with several voices, per beam
+    // group or per chord otherwise
     let mut up: Vec<bool> = voice
         .events
         .iter()
-        .map(|e| forced_up.unwrap_or_else(|| stem_up_for(&positions(e, staff))))
+        .map(|e| {
+            e.stem
+                .or(forced_up)
+                .unwrap_or_else(|| stem_up_for(&positions(e, staff)))
+        })
         .collect();
     // Beams spanning a very wide range sit between the notes, stems pointing at them
     let mut mixed: Vec<Option<f32>> = vec![None; voice.beams.len()];
-    if forced_up.is_none() {
-        for (b, beam) in voice.beams.iter().enumerate() {
-            let all: Vec<i32> = voice.events[beam.first..=beam.last]
-                .iter()
-                .flat_map(|e| positions(e, staff))
-                .collect();
-            let (Some(&low), Some(&high)) = (all.iter().min(), all.iter().max()) else {
-                continue;
-            };
+    for (b, beam) in voice.beams.iter().enumerate() {
+        let all: Vec<i32> = voice.events[beam.first..=beam.last]
+            .iter()
+            .flat_map(|e| positions(e, staff))
+            .collect();
+        let (Some(&low), Some(&high)) = (all.iter().min(), all.iter().max()) else {
+            continue;
+        };
+        let middle = (pos_y(staff, low) + pos_y(staff, high)) / 2.0;
+        let given: Vec<bool> = voice.events[beam.first..=beam.last]
+            .iter()
+            .filter(|e| !e.is_rest())
+            .filter_map(|e| e.stem)
+            .collect();
+        if let Some(&first) = given.first() {
+            if given.iter().all(|&s| s == first) {
+                up[beam.first..=beam.last]
+                    .iter_mut()
+                    .for_each(|u| *u = first);
+            } else {
+                // The score points the stems both ways: a beam between the notes
+                mixed[b] = Some(middle);
+            }
+            continue;
+        }
+        if forced_up.is_none() {
             if pos_y(staff, low) - pos_y(staff, high) > MIXED_BEAM_RANGE {
-                let middle = (pos_y(staff, low) + pos_y(staff, high)) / 2.0;
                 mixed[b] = Some(middle);
                 for i in beam.first..=beam.last {
                     let chord_low = positions(&voice.events[i], staff).first().copied();
@@ -638,7 +802,7 @@ fn engrave_voice(
     let mut chords: Vec<Option<Chord>> = Vec::with_capacity(voice.events.len());
     for (i, event) in voice.events.iter().enumerate() {
         if event.is_rest() {
-            rest(out, event, other, staff, forced_up, x_of, width);
+            rest(out, event, others, staff, forced_up, x_of, width);
             chords.push(None);
         } else {
             let x = x_of(event.tick);
@@ -696,6 +860,7 @@ fn engrave_voice(
         ottava_lines(out, voice, staff, &chords, x_of, metrics);
     }
     tuplets(out, voice, staff, &chords, metrics);
+    chords
 }
 
 fn chord(
@@ -772,7 +937,7 @@ fn chord(
     // Grace notes: small slashed notes before the chord (and its accidentals)
     let accidental_room = accidentals_width(event, staff);
     for (g, grace) in event.grace.iter().rev().enumerate() {
-        let bottom = STAVES[staff].bottom_line_step();
+        let bottom = event.clef.bottom_line_step();
         let p = grace.step - bottom - 7 * event.ottava as i32;
         let gx = x + left - accidental_room - (g + 1) as f32 * GRACE_SPACING;
         let ink = Ink::Note(NoteRef {
@@ -885,6 +1050,94 @@ fn chord(
         });
     }
 
+    // Other articulations stack outwards on the head side; fermatas go above
+    let mut stacked = if event.staccato { 2 } else { 0 };
+    for articulation in &event.articulations {
+        let (pair, always_above) = match articulation {
+            Articulation::Accent => (glyphs::ACCENT, false),
+            Articulation::Tenuto => (glyphs::TENUTO, false),
+            Articulation::Marcato => (glyphs::MARCATO, true),
+            Articulation::Staccatissimo => (glyphs::STACCATISSIMO, false),
+            Articulation::Fermata => (glyphs::FERMATA, true),
+        };
+        let (c, p) = if always_above {
+            (pair.0, highest.max(8) + 3 + stacked)
+        } else if up {
+            let mut p = lowest - 2 - stacked;
+            if (0..=8).contains(&p) && p % 2 == 0 {
+                p -= 1;
+            }
+            (pair.1, p)
+        } else {
+            let mut p = highest + 2 + stacked;
+            if (0..=8).contains(&p) && p % 2 == 0 {
+                p += 1;
+            }
+            (pair.0, p)
+        };
+        out.push(Element::Glyph {
+            c,
+            x: x + head / 2.0 - 0.55,
+            y: pos_y(staff, p),
+            size: 1.0,
+            ink: chord_ink,
+        });
+        stacked += 2;
+    }
+
+    // Ornaments above the staff
+    if let Some(ornament) = event.ornament {
+        let c = match ornament {
+            Ornament::Trill => glyphs::TRILL,
+            Ornament::Turn => glyphs::TURN,
+            Ornament::InvertedTurn => glyphs::INVERTED_TURN,
+            Ornament::Mordent => glyphs::MORDENT,
+            Ornament::InvertedMordent => glyphs::SHORT_TRILL,
+        };
+        out.push(Element::Glyph {
+            c,
+            x: x + head / 2.0 - 0.7,
+            y: pos_y(staff, highest.max(8) + 4),
+            size: 1.0,
+            ink: chord_ink,
+        });
+    }
+
+    // Fingering: above the chord on the upper staff, below it on the lower one
+    let fingerings: Vec<(usize, &str)> = event
+        .notes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| n.fingering.as_deref().map(|f| (i, f)))
+        .collect();
+    for (k, (i, text)) in fingerings.iter().rev().enumerate() {
+        let y = if staff == 0 {
+            pos_y(staff, highest.max(8) + 3) - k as f32 * 1.1
+        } else {
+            pos_y(staff, lowest.min(0) - 4) + (fingerings.len() - 1 - k) as f32 * 1.1
+        };
+        for (j, d) in text.chars().filter_map(|c| c.to_digit(10)).enumerate() {
+            out.push(Element::Glyph {
+                c: glyphs::fingering_digit(d),
+                x: x + head / 2.0 - 0.35 + j as f32 * 0.7,
+                y,
+                size: 0.8,
+                ink: note_ink(*i),
+            });
+        }
+    }
+
+    // Rolled chord: wavy line left of everything else
+    if event.arpeggio {
+        let graces = event.grace.len() as f32 * GRACE_SPACING;
+        out.push(Element::Wiggle {
+            x: x + left - accidental_room - graces - ARPEGGIO_ROOM + 0.2,
+            y0: pos_y(staff, highest) - 0.6,
+            y1: pos_y(staff, lowest) + 0.6,
+            ink: chord_ink,
+        });
+    }
+
     // Trill sign above the staff
     if event.notes.iter().any(|n| n.trill) {
         out.push(Element::Glyph {
@@ -901,6 +1154,7 @@ fn chord(
     let extra = match flags {
         2 => 0.25,
         3 => 0.75,
+        4 => 1.25,
         _ => 0.0,
     };
     let middle = pos_y(staff, 4);
@@ -937,7 +1191,7 @@ fn chord(
 fn rest(
     out: &mut Vec<Element>,
     event: &Event,
-    other: Option<&Voice>,
+    others: &[&Voice],
     staff: usize,
     forced_up: Option<bool>,
     x_of: &dyn Fn(u64) -> f32,
@@ -951,12 +1205,13 @@ fn rest(
         NoteValue::Eighth => (glyphs::REST_8TH, 4),
         NoteValue::Sixteenth => (glyphs::REST_16TH, 4),
         NoteValue::ThirtySecond => (glyphs::REST_32ND, 4),
+        NoteValue::SixtyFourth => (glyphs::REST_64TH, 4),
     };
     // With two voices, rests move out of the way of the other voice's notes
     // sounding at the same time
     let (start, end) = (event.tick, event.tick + event.ticks);
-    let overlapping: Vec<i32> = other
-        .into_iter()
+    let overlapping: Vec<i32> = others
+        .iter()
         .flat_map(|v| v.events.iter())
         .filter(|e| e.tick < end && e.tick + e.ticks > start)
         .flat_map(|e| positions(e, staff))
@@ -1452,6 +1707,265 @@ fn ottava_lines(
             ink: Ink::Plain,
         });
         i = j + 1;
+    }
+}
+
+impl Chord {
+    /// y of the highest and the lowest note head
+    fn heads(&self) -> (f32, f32) {
+        if self.up {
+            (self.outer, self.base + 0.17)
+        } else {
+            (self.base - 0.17, self.outer)
+        }
+    }
+
+    /// Where a slur on one side attaches
+    fn slur_anchor(&self, above: bool) -> f32 {
+        let (top, bottom) = self.heads();
+        if above {
+            let y = top - 0.9;
+            if self.up { y.min(self.tip - 0.4) } else { y }
+        } else {
+            let y = bottom + 0.9;
+            if self.up { y } else { y.max(self.tip + 0.4) }
+        }
+    }
+}
+
+/// Slurs starting, ending or passing through this measure
+fn slurs(
+    out: &mut Vec<Element>,
+    score: &Score,
+    index: usize,
+    geometry: &[Vec<Vec<Option<Chord>>>; 2],
+    width: f32,
+) {
+    let chord_at = |r: &midi_file::score::EventRef| -> Option<&Chord> {
+        geometry.get(r.staff)?.get(r.voice)?.get(r.event)?.as_ref()
+    };
+
+    for slur in &score.slurs {
+        if slur.start.measure > index || slur.end.measure < index {
+            continue;
+        }
+        let start = (slur.start.measure == index)
+            .then(|| chord_at(&slur.start))
+            .flatten();
+        let end = (slur.end.measure == index)
+            .then(|| chord_at(&slur.end))
+            .flatten();
+        if start.is_none() && end.is_none() && slur.start.measure == index {
+            continue;
+        }
+
+        // On the head side: below for stems up, above otherwise
+        let reference = start.or(end);
+        let above = slur
+            .above
+            .unwrap_or_else(|| reference.is_none_or(|c| !c.up));
+        let staff = slur.start.staff;
+        let fallback = if above {
+            staff_top(staff) - 1.0
+        } else {
+            STAFF_BOTTOM[staff] + 1.0
+        };
+
+        let (x0, y0) = match start {
+            Some(c) => (c.x + c.head * 0.6, c.slur_anchor(above)),
+            None => (0.3, end.map_or(fallback, |c| c.slur_anchor(above))),
+        };
+        let (x1, y1) = match end {
+            Some(c) => (c.x + c.head * 0.4, c.slur_anchor(above)),
+            None => (width - 0.3, y0),
+        };
+        if x1 <= x0 + 0.5 {
+            continue;
+        }
+
+        // Curve height from the length, raised to clear the notes in between
+        let length = x1 - x0;
+        let mut height = (0.5 + 0.06 * length).min(2.0);
+        if let Some(voice) = geometry.get(staff).and_then(|g| g.get(slur.start.voice)) {
+            for c in voice.iter().flatten() {
+                if c.x <= x0 || c.x >= x1 {
+                    continue;
+                }
+                let u = (c.x - x0) / length;
+                let line = y0 + (y1 - y0) * u;
+                let bulge = 4.0 * u * (1.0 - u);
+                if bulge < 0.2 {
+                    continue;
+                }
+                let needed = if above {
+                    line - c.slur_anchor(true)
+                } else {
+                    c.slur_anchor(false) - line
+                };
+                height = height.max(needed / bulge);
+            }
+        }
+        height = height.min(4.0);
+
+        out.push(Element::Slur {
+            x0,
+            y0,
+            x1,
+            y1,
+            height: if above { -height } else { height },
+            ink: Ink::Plain,
+        });
+    }
+}
+
+/// Where hairpins and dynamics of a staff go, above or below it
+fn expression_y(staff: usize, above: bool) -> f32 {
+    let between = (STAFF_BOTTOM[0] + staff_top(1)) / 2.0;
+    match (staff, above) {
+        (0, true) => staff_top(0) - 2.2,
+        (0, false) | (1, true) => between,
+        _ => STAFF_BOTTOM[1] + 2.6,
+    }
+}
+
+/// Crescendo / diminuendo hairpins over this measure
+fn wedges(out: &mut Vec<Element>, score: &Score, index: usize, ticks: &[(u64, f32)], width: f32) {
+    let measure = &score.measures[index];
+    for wedge in &score.wedges {
+        if wedge.start.0 > index || wedge.end.0 < index {
+            continue;
+        }
+        let (ts, te) = (wedge.start.1, wedge.end.1.max(wedge.start.1 + 1));
+        let t0 = ts.max(measure.start_tick);
+        let t1 = te.min(measure.end_tick);
+        let x0 = if wedge.start.0 == index {
+            tick_to_x(ticks, t0)
+        } else {
+            0.3
+        };
+        let x1 = if wedge.end.0 == index {
+            tick_to_x(ticks, t1)
+        } else {
+            width - 0.3
+        };
+        if x1 <= x0 + 0.3 {
+            continue;
+        }
+
+        let opening = |t: u64| {
+            let p = (t.saturating_sub(ts)) as f32 / (te - ts) as f32;
+            let p = p.clamp(0.0, 1.0);
+            0.9 * if wedge.crescendo { p } else { 1.0 - p }
+        };
+        let (o0, o1) = (opening(t0), opening(t1));
+        let y = expression_y(wedge.staff, wedge.above);
+        for sign in [-1.0f32, 1.0] {
+            out.push(Element::Beam {
+                x0,
+                y0: y + sign * o0 / 2.0 - 0.05,
+                x1,
+                y1: y + sign * o1 / 2.0 - 0.05,
+                thickness: 0.1,
+                ink: Ink::Plain,
+            });
+        }
+    }
+}
+
+/// Dynamics and words, moved aside when they would overlap
+fn directions(out: &mut Vec<Element>, measure: &Measure, ticks: &[(u64, f32)]) {
+    let mut placed: Vec<(f32, f32, f32)> = Vec::new();
+    let mut place = |y: f32, x0: f32, x1: f32, away: f32| -> f32 {
+        let mut y = y;
+        while placed
+            .iter()
+            .any(|&(py, a, b)| (py - y).abs() < 1.2 && x0 < b && a < x1)
+        {
+            y += away;
+        }
+        placed.push((y, x0, x1));
+        y
+    };
+
+    for d in &measure.directions {
+        let x = tick_to_x(ticks, d.tick);
+        // Rows above a staff grow upwards, the others downwards
+        let away = if d.staff == 0 && d.above { -1.4 } else { 1.4 };
+        match &d.kind {
+            midi_file::score::DirectionKind::Dynamic(name) => {
+                let letters: Vec<char> = name.chars().filter_map(glyphs::dynamic_letter).collect();
+                if letters.is_empty() {
+                    continue;
+                }
+                let w = letters.len() as f32 * 1.1;
+                let base = expression_y(d.staff, d.above) + 0.6;
+                let y = place(base, x - 0.4, x - 0.4 + w, away);
+                for (i, c) in letters.into_iter().enumerate() {
+                    out.push(Element::Glyph {
+                        c,
+                        x: x - 0.4 + i as f32 * 1.05,
+                        y,
+                        size: 1.0,
+                        ink: Ink::Plain,
+                    });
+                }
+            }
+            midi_file::score::DirectionKind::Words { text, italic, bold } => {
+                let size = 1.3;
+                let w = text.chars().count() as f32 * size * 0.5;
+                let base = if d.staff == 0 && d.above {
+                    staff_top(0) - 2.6
+                } else {
+                    expression_y(d.staff, d.above) + 0.5
+                };
+                let y = place(base, x, x + w, away);
+                out.push(Element::Text {
+                    text: text.clone(),
+                    x,
+                    y,
+                    size,
+                    italic: *italic,
+                    bold: *bold,
+                    ink: Ink::Plain,
+                });
+            }
+        }
+    }
+}
+
+/// Repeat barline with dots: at the start (thick, thin, dots) or the end (dots, thin, thick)
+fn repeat_sign(out: &mut Vec<Element>, x: f32, start: bool) {
+    let top = staff_top(0);
+    let bottom = STAFF_BOTTOM[1];
+    let (thick, thin, dots) = if start {
+        (x, x + 0.75, x + 1.15)
+    } else {
+        (x - 0.5, x - 1.0, x - 1.6)
+    };
+    out.push(Element::Rect {
+        x: thick,
+        y: top,
+        w: 0.5,
+        h: bottom - top,
+        ink: Ink::Plain,
+    });
+    out.push(Element::Rect {
+        x: thin,
+        y: top,
+        w: BARLINE_WIDTH,
+        h: bottom - top,
+        ink: Ink::Plain,
+    });
+    for staff in 0..2 {
+        for pos in [3, 5] {
+            out.push(Element::Glyph {
+                c: glyphs::REPEAT_DOT,
+                x: dots,
+                y: pos_y(staff, pos),
+                size: 1.0,
+                ink: Ink::Plain,
+            });
+        }
     }
 }
 
