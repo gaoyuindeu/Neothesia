@@ -200,8 +200,8 @@ impl super::MenuScene {
                         spacer(ui);
 
                         if nuon::settings_row_toggler()
-                            .title("Glow")
-                            .subtitle("Key glow effect")
+                            .title("Light Effects")
+                            .subtitle("Glow, light beams and sparks on played keys")
                             .value(ctx.config.glow())
                             .build(ui, rows)
                         {
@@ -217,6 +217,57 @@ impl super::MenuScene {
                             .build(ui, rows)
                         {
                             ctx.config.set_note_labels(!ctx.config.note_labels());
+                        }
+
+                        spacer(ui);
+
+                        let has_background = ctx.config.background_image().is_some();
+                        nuon::settings_row()
+                            .title("Background Image")
+                            .subtitle(
+                                ctx.config
+                                    .background_image()
+                                    .and_then(|path| path.file_name())
+                                    .map(|name| name.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "None (gradient)".to_string()),
+                            )
+                            .body(|ui, row_w, row_h| {
+                                if setting_row_button(row_w, row_h)
+                                    .label("Select File")
+                                    .build(ui)
+                                {
+                                    self.futures
+                                        .push(self::open_background_picker(&mut self.state));
+                                }
+
+                                if has_background
+                                    && setting_row_button(row_w - 93.0 - 10.0, row_h)
+                                        .label("Clear")
+                                        .build(ui)
+                                {
+                                    ctx.config.set_background_image(None);
+                                }
+                            })
+                            .build(ui, rows);
+
+                        if has_background {
+                            spacer(ui);
+
+                            let dim = ctx.config.background_dim();
+                            match nuon::settings_row_spin()
+                                .title("Background Darkness")
+                                .subtitle(format!("{}%", (dim * 100.0).round()))
+                                .id("background_dim")
+                                .build(ui, rows)
+                            {
+                                nuon::SettingsRowSpinResult::Plus => {
+                                    ctx.config.set_background_dim(dim + 0.05)
+                                }
+                                nuon::SettingsRowSpinResult::Minus => {
+                                    ctx.config.set_background_dim(dim - 0.05)
+                                }
+                                nuon::SettingsRowSpinResult::Idle => {}
+                            }
                         }
                     });
             });
@@ -644,6 +695,25 @@ async fn open_sondfont_picker_fut() -> Option<PathBuf> {
     } else {
         log::info!("User canceled dialog");
     }
+
+    file.map(|f| f.path().to_owned())
+}
+
+pub fn open_background_picker(data: &mut UiState) -> BoxFuture<MsgFn> {
+    data.is_loading = true;
+    on_async(open_background_picker_fut(), |res, data, ctx| {
+        if let Some(path) = res {
+            ctx.config.set_background_image(Some(path));
+        }
+        data.is_loading = false;
+    })
+}
+
+async fn open_background_picker_fut() -> Option<PathBuf> {
+    let file = rfd::AsyncFileDialog::new()
+        .add_filter("Image", &["jpg", "jpeg", "png", "webp"])
+        .pick_file()
+        .await;
 
     file.map(|f| f.path().to_owned())
 }

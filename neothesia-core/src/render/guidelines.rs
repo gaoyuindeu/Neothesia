@@ -62,10 +62,11 @@ impl GuidelineRenderer {
             let w = 1.0;
             let h = size.height;
 
+            // Translucent, so that they sit nicely on top of a background image
             let color = if key.note_id() == 0 {
-                [0.2, 0.2, 0.2, 1.0]
+                [1.0, 1.0, 1.0, 0.07]
             } else {
-                [0.05, 0.05, 0.05, 1.0]
+                [1.0, 1.0, 1.0, 0.025]
             };
 
             self.cache.push(QuadInstance {
@@ -104,7 +105,7 @@ impl GuidelineRenderer {
             quads.layer().push(QuadInstance {
                 position: [x, y],
                 size: [w, h],
-                color: [0.05, 0.05, 0.05, 1.0],
+                color: [1.0, 1.0, 1.0, 0.035],
                 border_radius: [0.0, 0.0, 0.0, 0.0],
                 ..Default::default()
             });

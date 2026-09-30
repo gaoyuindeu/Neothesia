@@ -1,6 +1,6 @@
 use midi_file::midly::MidiMessage;
 use neothesia_core::render::{
-    GlowRenderer, GuidelineRenderer, NoteLabels, QuadRenderer, TextRenderer,
+    Backdrop, FxKey, FxRenderer, GuidelineRenderer, NoteLabels, QuadRenderer, TextRenderer,
 };
 use std::time::Duration;
 use winit::{
@@ -48,7 +48,8 @@ pub struct PlayingScene {
     step_controller: StepController,
     quad_renderer_bg: QuadRenderer,
     quad_renderer_fg: QuadRenderer,
-    glow: Option<GlowRenderer>,
+    fx: Option<FxRenderer>,
+    backdrop: Backdrop,
     toast_manager: ToastManager,
 
     nuon: nuon::Ui,
@@ -111,11 +112,21 @@ impl PlayingScene {
         let quad_renderer_bg = ctx.quad_renderer_factory.new_renderer();
         let quad_renderer_fg = ctx.quad_renderer_factory.new_renderer();
 
-        let glow = ctx.config.glow().then_some(GlowRenderer::new(
+        let fx = ctx.config.glow().then(|| {
+            FxRenderer::new(
+                &ctx.gpu,
+                &ctx.transform,
+                keyboard.layout().range.iter().count(),
+            )
+        });
+
+        let backdrop = Backdrop::new(
             &ctx.gpu,
-            &ctx.transform,
-            keyboard.layout(),
-        ));
+            ctx.config.background_image(),
+            ctx.config.background_color(),
+            ctx.config.background_dim(),
+            ctx.config.background_blur(),
+        );
 
         Self {
             keyboard,
@@ -130,7 +141,8 @@ impl PlayingScene {
             step_controller,
             quad_renderer_bg,
             quad_renderer_fg,
-            glow,
+            fx,
+            backdrop,
             toast_manager: ToastManager::default(),
 
             nuon: nuon::Ui::new(),
@@ -141,30 +153,30 @@ impl PlayingScene {
         }
     }
 
-    fn update_glow(&mut self, delta: Duration) {
-        let Some(glow) = &mut self.glow else {
+    fn update_fx(&mut self, delta: Duration) {
+        let Some(fx) = &mut self.fx else {
             return;
         };
 
-        glow.clear();
+        let layout = self.keyboard.layout();
+        let pos = *self.keyboard.pos();
 
-        let keys = &self.keyboard.layout().keys;
-        let states = self.keyboard.key_states();
+        let pressed: Vec<FxKey> = layout
+            .keys
+            .iter()
+            .zip(self.keyboard.key_states())
+            .filter_map(|(key, state)| {
+                let color = state.pressed_by_file().or(state.pressed_by_user())?;
+                Some(FxKey {
+                    id: key.id(),
+                    x: pos.x + key.x(),
+                    width: key.width(),
+                    color: *color,
+                })
+            })
+            .collect();
 
-        for (key, state) in keys.iter().zip(states) {
-            let Some(color) = state.pressed_by_file() else {
-                continue;
-            };
-
-            glow.push(
-                key.id(),
-                *color,
-                key.x(),
-                self.keyboard.pos().y,
-                key.width(),
-                delta,
-            );
-        }
+        fx.update(delta, &pressed, pos.x, layout.width, pos.y);
     }
 
     fn update_chord_identifier(&mut self, enabled: bool) {
@@ -256,7 +268,10 @@ impl Scene for PlayingScene {
             );
         }
 
-        self.update_glow(delta);
+        self.update_fx(delta);
+        let size = ctx.window_state.physical_size;
+        self.backdrop
+            .update(delta, (size.width as f32, size.height as f32));
 
         TopBar::update(self, ctx);
 
@@ -275,8 +290,8 @@ impl Scene for PlayingScene {
         self.quad_renderer_bg.prepare();
         self.quad_renderer_fg.prepare();
 
-        if let Some(glow) = &mut self.glow {
-            glow.prepare();
+        if let Some(fx) = &mut self.fx {
+            fx.prepare();
         }
 
         #[cfg(debug_assertions)]
@@ -300,14 +315,15 @@ impl Scene for PlayingScene {
 
     #[profiling::function]
     fn render<'pass>(&'pass mut self, rpass: &mut wgpu_jumpstart::RenderPass<'pass>) {
+        self.backdrop.render(rpass);
         self.quad_renderer_bg.render(rpass);
         self.waterfall.render(rpass);
         if let Some(note_labels) = self.note_labels.as_mut() {
             note_labels.render(rpass);
         }
         self.quad_renderer_fg.render(rpass);
-        if let Some(glow) = &self.glow {
-            glow.render(rpass);
+        if let Some(fx) = &self.fx {
+            fx.render(rpass);
         }
         self.text_renderer.render(rpass);
 

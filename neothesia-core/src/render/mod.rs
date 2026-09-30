@@ -1,4 +1,6 @@
+mod backdrop;
 mod background_animation;
+mod fx;
 mod glow;
 mod guidelines;
 mod image;
@@ -8,7 +10,9 @@ mod quad;
 mod text;
 mod waterfall;
 
+pub use backdrop::Backdrop;
 pub use background_animation::BgPipeline;
+pub use fx::{FxKey, FxRenderer};
 pub use glow::GlowRenderer;
 pub use guidelines::GuidelineRenderer;
 pub use image::{Image, ImageIdentifier, ImageRenderer};

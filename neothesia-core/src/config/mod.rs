@@ -208,6 +208,26 @@ impl Config {
         self.appearance.background_color = background_color;
     }
 
+    pub fn background_image(&self) -> Option<&std::path::Path> {
+        self.appearance.background_image.as_deref()
+    }
+
+    pub fn set_background_image(&mut self, path: Option<std::path::PathBuf>) {
+        self.appearance.background_image = path;
+    }
+
+    pub fn background_dim(&self) -> f32 {
+        self.appearance.background_dim
+    }
+
+    pub fn set_background_dim(&mut self, dim: f32) {
+        self.appearance.background_dim = dim.clamp(0.0, 1.0);
+    }
+
+    pub fn background_blur(&self) -> f32 {
+        self.appearance.background_blur
+    }
+
     pub fn color_schema(&self) -> &[ColorSchemaV1] {
         &self.appearance.color_schema
     }

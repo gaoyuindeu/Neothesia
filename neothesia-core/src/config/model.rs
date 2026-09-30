@@ -177,6 +177,26 @@ pub struct AppearanceConfigV1 {
 
     #[serde(default)]
     pub chord_identifier: bool,
+
+    /// Image drawn behind the waterfall (jpg, png or webp)
+    #[serde(default)]
+    pub background_image: Option<std::path::PathBuf>,
+
+    /// How much the background image is darkened, 0 = not at all, 1 = black
+    #[serde(default = "default_background_dim")]
+    pub background_dim: f32,
+
+    /// Blur radius of the background image, in pixels
+    #[serde(default = "default_background_blur")]
+    pub background_blur: f32,
+}
+
+fn default_background_dim() -> f32 {
+    0.55
+}
+
+fn default_background_blur() -> f32 {
+    4.0
 }
 
 #[derive(Serialize, Deserialize)]
@@ -193,6 +213,9 @@ impl Default for AppearanceConfig {
             horizontal_guidelines: default_horizontal_guidelines(),
             glow: default_glow(),
             chord_identifier: false,
+            background_image: None,
+            background_dim: default_background_dim(),
+            background_blur: default_background_blur(),
         })
     }
 }

@@ -36,7 +36,7 @@ struct Glide {
 
 impl StepController {
     pub fn new(song: &Song, lead_in: Duration) -> Self {
-        let mut starts: Vec<Duration> = song
+        let starts: Vec<Duration> = song
             .file
             .tracks
             .iter()
