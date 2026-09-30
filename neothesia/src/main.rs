@@ -53,26 +53,31 @@ struct Neothesia {
     frame_dump: Option<FrameDump>,
 }
 
-/// Debugging aid: `NEOTHESIA_FRAME_DUMP=<dir>` saves the frames listed in
-/// `NEOTHESIA_FRAME_DUMP_AT` (comma separated frame numbers, default 90) as PNG files and
-/// quits after the last one
+/// Debugging aid: `NEOTHESIA_FRAME_DUMP=<dir>` saves a frame at each time listed in
+/// `NEOTHESIA_FRAME_DUMP_AT` (comma separated seconds after start, default 2) as PNG files
+/// and quits after the last one
 struct FrameDump {
     dir: std::path::PathBuf,
-    at: Vec<u64>,
-    frame: u64,
+    /// Seconds, sorted; the ones left to save
+    at: Vec<f64>,
+    start: std::time::Instant,
 }
 
 impl FrameDump {
     fn from_env() -> Option<Self> {
         let dir = std::path::PathBuf::from(std::env::var_os("NEOTHESIA_FRAME_DUMP")?);
-        let mut at: Vec<u64> = std::env::var("NEOTHESIA_FRAME_DUMP_AT")
-            .unwrap_or_else(|_| "90".into())
+        let mut at: Vec<f64> = std::env::var("NEOTHESIA_FRAME_DUMP_AT")
+            .unwrap_or_else(|_| "2".into())
             .split(',')
             .filter_map(|s| s.trim().parse().ok())
             .collect();
-        at.sort_unstable();
+        at.sort_by(f64::total_cmp);
         std::fs::create_dir_all(&dir).ok()?;
-        Some(Self { dir, at, frame: 0 })
+        Some(Self {
+            dir,
+            at,
+            start: std::time::Instant::now(),
+        })
     }
 }
 
@@ -284,8 +289,7 @@ impl Neothesia {
     /// Render the frame once more into a texture that can be read back
     fn encode_frame_dump(&mut self, size: wgpu::Extent3d) -> Option<(wgpu::Buffer, u32, u32)> {
         let dump = self.frame_dump.as_mut()?;
-        dump.frame += 1;
-        if !dump.at.contains(&dump.frame) {
+        if dump.at.first()? > &dump.start.elapsed().as_secs_f64() {
             return None;
         }
 
@@ -338,9 +342,10 @@ impl Neothesia {
     }
 
     fn save_frame_dump(&mut self, (buffer, width, height): (wgpu::Buffer, u32, u32)) {
-        let Some(dump) = self.frame_dump.as_ref() else {
+        let Some(dump) = self.frame_dump.as_mut() else {
             return;
         };
+        let second = dump.at.remove(0);
         let slice = buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         self.context
@@ -370,12 +375,12 @@ impl Neothesia {
                 }
             }
         }
-        let path = dump.dir.join(format!("frame_{:05}.png", dump.frame));
+        let path = dump.dir.join(format!("frame_{second:06.2}s.png"));
         match neothesia_image::save_png(&path, &rgba, width, height) {
             Ok(()) => log::info!("Saved {}", path.display()),
             Err(err) => log::error!("{}: {err}", path.display()),
         }
-        if dump.at.last() == Some(&dump.frame) {
+        if dump.at.is_empty() {
             self.context.proxy.send_event(NeothesiaEvent::Exit).ok();
         }
     }

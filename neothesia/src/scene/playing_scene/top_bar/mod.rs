@@ -60,7 +60,10 @@ impl TopBar {
         let window_state = &ctx.window_state;
 
         let h = 75.0;
-        let is_hovered = window_state.cursor_logical_position.y < h * 1.7;
+        let cursor = window_state.cursor_logical_position;
+        let is_hovered = cursor.y < h * 1.7
+            && cursor.y >= 0.0
+            && (0.0..window_state.logical_size.width).contains(&cursor.x);
 
         top_bar.is_expanded = is_hovered;
         top_bar.is_expanded |= top_bar.settings_active;

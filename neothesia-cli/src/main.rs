@@ -135,6 +135,10 @@ impl Recorder {
             *keyboard.pos(),
             waterfall.notes(),
             text_renderer_factory.new_renderer(),
+            neothesia_core::render::LabelOptions {
+                names: true,
+                ..Default::default()
+            },
         ));
 
         Self {

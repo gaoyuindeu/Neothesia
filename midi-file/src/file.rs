@@ -72,7 +72,14 @@ fn signatures(smf: &Smf<'_>) -> (Vec<TimeSignature>, Vec<KeySignature>) {
 }
 
 impl MidiFile {
+    /// Read a MIDI or MusicXML file; notes of the two hands get fingers
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        let mut file = Self::load(path.as_ref())?;
+        crate::fingering::annotate(&mut file);
+        Ok(file)
+    }
+
+    fn load(path: &Path) -> Result<Self, String> {
         if crate::musicxml::is_musicxml(path.as_ref()) {
             return crate::musicxml::load(path.as_ref());
         }

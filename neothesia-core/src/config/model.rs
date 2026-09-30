@@ -211,9 +211,21 @@ pub struct AppearanceConfigV1 {
     /// Show the grand staff above the waterfall (score-like MIDI files only)
     #[serde(default = "default_sheet_music")]
     pub sheet_music: bool,
+
+    /// Show fingering on the staff and the falling notes
+    #[serde(default = "default_true")]
+    pub fingering: bool,
+
+    /// Show estimated fingers where the score has none
+    #[serde(default = "default_true")]
+    pub estimated_fingering: bool,
 }
 
 fn default_sheet_music() -> bool {
+    true
+}
+
+fn default_true() -> bool {
     true
 }
 
@@ -243,6 +255,8 @@ impl Default for AppearanceConfig {
             background_dim: default_background_dim(),
             background_blur: default_background_blur(),
             sheet_music: default_sheet_music(),
+            fingering: true,
+            estimated_fingering: true,
         })
     }
 }

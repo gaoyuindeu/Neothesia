@@ -34,6 +34,8 @@ pub struct MidiNote {
     pub channel: u8,
     pub track_id: usize,
     pub track_color_id: usize,
+    /// Printed in the score or estimated, see [`crate::fingering`]
+    pub finger: Option<crate::fingering::Finger>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +138,7 @@ impl EventsBuilder {
                 channel: active.channel,
                 track_id,
                 track_color_id,
+                finger: None,
             };
 
             self.notes.push(note);

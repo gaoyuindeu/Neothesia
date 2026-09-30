@@ -387,6 +387,13 @@ impl Canvas<'_> {
                     self.colors.ink
                 }
             }
+            Ink::Estimated(note) => {
+                if note.end <= self.time {
+                    self.colors.played
+                } else {
+                    self.colors.hands[note.hand.min(1)]
+                }
+            }
         }
     }
 

@@ -256,6 +256,22 @@ impl Config {
         self.appearance.sheet_music = sheet_music;
     }
 
+    pub fn fingering(&self) -> bool {
+        self.appearance.fingering
+    }
+
+    pub fn set_fingering(&mut self, fingering: bool) {
+        self.appearance.fingering = fingering;
+    }
+
+    pub fn estimated_fingering(&self) -> bool {
+        self.appearance.estimated_fingering
+    }
+
+    pub fn set_estimated_fingering(&mut self, estimated: bool) {
+        self.appearance.estimated_fingering = estimated;
+    }
+
     pub fn background_blur(&self) -> f32 {
         self.appearance.background_blur
     }

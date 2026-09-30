@@ -210,6 +210,8 @@ pub struct ScoreNote {
     /// Trilled (the ornament is shown on the first event of the note)
     pub trill: bool,
     pub fingering: Option<String>,
+    /// `fingering` was estimated, not printed
+    pub fingering_auto: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -403,13 +405,15 @@ impl Score {
             notation::build(file, ppq, &meters, &notes, &voices, &tuplet_beats, &pedal);
         notation::attach_graces(&mut measures, &notes, &graces);
 
-        Self {
+        let mut score = Self {
             ppq,
             measures,
             grid_alignment,
             slurs: Vec::new(),
             wedges: Vec::new(),
-        }
+        };
+        crate::fingering::fill_score(&mut score, file);
+        score
     }
 
     pub fn is_readable(&self) -> bool {

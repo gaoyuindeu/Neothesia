@@ -143,6 +143,10 @@ impl Preview {
             *keyboard.pos(),
             waterfall.notes(),
             ctx.text_renderer_factory.new_renderer(),
+            neothesia_core::render::LabelOptions {
+                names: true,
+                ..Default::default()
+            },
         ));
 
         let mut player = MidiPlayer::new_with_lead_in(

@@ -854,6 +854,7 @@ pub fn build(raw: RawScore, name: String) -> Result<MidiFile, String> {
                     tie_to_next: n.tie_start,
                     trill: n.ornament == Some(Ornament::Trill),
                     fingering: n.fingering.clone(),
+                    fingering_auto: false,
                 }
             });
 

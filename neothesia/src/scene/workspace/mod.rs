@@ -142,9 +142,10 @@ pub struct Workspace {
     nuon: nuon::Ui,
     nuon_renderer: NuonRenderer,
 
-    /// Debugging aid (`NEOTHESIA_START_PAGE=tracks|settings`): open this page once the
-    /// first song is loaded, for frame dumps of the pages
+    /// Debugging aid (`NEOTHESIA_START_PAGE=tracks|settings|play`): open this page, or
+    /// start playing, once the first song is loaded (for frame dumps)
     start_page: Option<Page>,
+    start_playing: bool,
 
     /// Physical rectangles for rendering: main view and the whole window
     view_px: [u32; 4],
@@ -190,6 +191,7 @@ impl Workspace {
                 Ok("settings") => Some(Page::Settings),
                 _ => None,
             },
+            start_playing: std::env::var("NEOTHESIA_START_PAGE").as_deref() == Ok("play"),
             view_px: [0; 4],
             window_px: [1, 1],
         };
@@ -279,7 +281,8 @@ impl Workspace {
                     "{} \u{2014} Neothesia",
                     path.file_stem().unwrap_or_default().to_string_lossy()
                 ));
-                self.open_song(ctx, Song::new(file), false);
+                let play = std::mem::take(&mut self.start_playing);
+                self.open_song(ctx, Song::new(file), play);
                 // Keys go to the player now (arrows step / rewind)
                 self.library_focused = false;
                 if let Some(page) = self.start_page.take() {

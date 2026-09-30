@@ -9,6 +9,9 @@ use winit::{
     event::WindowEvent,
 };
 
+/// Cursor position while the pointer is not over the window
+const OUTSIDE: f64 = -10_000.0;
+
 #[derive(Clone)]
 pub struct WindowState {
     pub physical_size: PhysicalSize<u32>,
@@ -36,8 +39,9 @@ impl WindowState {
             (physical_size, logical_size)
         };
 
-        let cursor_physical_position = PhysicalPosition::new(0.0, 0.0);
-        let cursor_logical_position = LogicalPosition::new(0.0, 0.0);
+        // Not over the window until it says so
+        let cursor_physical_position = PhysicalPosition::new(OUTSIDE, OUTSIDE);
+        let cursor_logical_position = LogicalPosition::new(OUTSIDE as f32, OUTSIDE as f32);
 
         Self {
             physical_size,
@@ -71,6 +75,10 @@ impl WindowState {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_physical_position = *position;
                 self.cursor_logical_position = position.to_logical(self.scale_factor);
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor_physical_position = PhysicalPosition::new(OUTSIDE, OUTSIDE);
+                self.cursor_logical_position = LogicalPosition::new(OUTSIDE as f32, OUTSIDE as f32);
             }
             WindowEvent::Focused(f) => {
                 self.focused = *f;

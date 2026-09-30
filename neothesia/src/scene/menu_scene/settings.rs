@@ -232,6 +232,31 @@ impl super::MenuScene {
 
                         spacer(ui);
 
+                        if nuon::settings_row_toggler()
+                            .title("Fingering")
+                            .subtitle("Finger numbers on the staff and the falling notes")
+                            .value(ctx.config.fingering())
+                            .build(ui, rows)
+                        {
+                            ctx.config.set_fingering(!ctx.config.fingering());
+                        }
+
+                        spacer(ui);
+
+                        if nuon::settings_row_toggler()
+                            .title("Estimate Missing Fingering")
+                            .subtitle(
+                                "Suggested fingers (in the hand's color) where the score has none",
+                            )
+                            .value(ctx.config.estimated_fingering())
+                            .build(ui, rows)
+                        {
+                            ctx.config
+                                .set_estimated_fingering(!ctx.config.estimated_fingering());
+                        }
+
+                        spacer(ui);
+
                         let has_background = ctx.config.background_image().is_some();
                         nuon::settings_row()
                             .title("Background Image")

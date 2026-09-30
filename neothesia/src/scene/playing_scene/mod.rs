@@ -1,7 +1,7 @@
 use midi_file::midly::MidiMessage;
 use neothesia_core::render::{
-    Backdrop, FxKey, FxRenderer, GuidelineRenderer, NoteLabels, QuadRenderer, SheetColors,
-    SheetRenderer, TextRenderer,
+    Backdrop, FxKey, FxRenderer, GuidelineRenderer, LabelOptions, NoteLabels, QuadRenderer,
+    SheetColors, SheetRenderer, TextRenderer,
 };
 use std::time::Duration;
 use winit::{
@@ -102,11 +102,19 @@ impl PlayingScene {
 
         let text_renderer = ctx.text_renderer_factory.new_renderer();
 
-        let note_labels = ctx.config.note_labels().then_some(NoteLabels::new(
-            *keyboard.pos(),
-            waterfall.notes(),
-            ctx.text_renderer_factory.new_renderer(),
-        ));
+        let label_options = LabelOptions {
+            names: ctx.config.note_labels(),
+            printed_fingers: ctx.config.fingering(),
+            estimated_fingers: ctx.config.fingering() && ctx.config.estimated_fingering(),
+        };
+        let note_labels = label_options.any().then(|| {
+            NoteLabels::new(
+                *keyboard.pos(),
+                waterfall.notes(),
+                ctx.text_renderer_factory.new_renderer(),
+                label_options,
+            )
+        });
 
         let player = MidiPlayer::new(
             ctx.output_manager.connection().clone(),
@@ -130,7 +138,12 @@ impl PlayingScene {
         });
 
         let sheet = {
-            let score = midi_file::score::Score::new(&player.song().file);
+            let mut score = midi_file::score::Score::new(&player.song().file);
+            midi_file::fingering::retain(
+                &mut score,
+                ctx.config.fingering(),
+                ctx.config.fingering() && ctx.config.estimated_fingering(),
+            );
             log::info!(
                 "Sheet music: grid alignment {:.2}, readable {}",
                 score.grid_alignment,

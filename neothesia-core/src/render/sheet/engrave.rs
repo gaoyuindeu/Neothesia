@@ -60,6 +60,8 @@ pub enum Ink {
     Plain,
     Dim,
     Note(NoteRef),
+    /// Estimated fingering: in the hand's color until played
+    Estimated(NoteRef),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1111,6 +1113,10 @@ fn chord(
         .filter_map(|(i, n)| n.fingering.as_deref().map(|f| (i, f)))
         .collect();
     for (k, (i, text)) in fingerings.iter().rev().enumerate() {
+        let ink = match note_ink(*i) {
+            Ink::Note(note) if event.notes[*i].fingering_auto => Ink::Estimated(note),
+            ink => ink,
+        };
         let y = if staff == 0 {
             pos_y(staff, highest.max(8) + 3) - k as f32 * 1.1
         } else {
@@ -1122,7 +1128,7 @@ fn chord(
                 x: x + head / 2.0 - 0.35 + j as f32 * 0.7,
                 y,
                 size: 0.8,
-                ink: note_ink(*i),
+                ink,
             });
         }
     }

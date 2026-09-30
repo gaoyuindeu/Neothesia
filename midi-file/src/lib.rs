@@ -1,5 +1,6 @@
 pub mod align;
 mod file;
+pub mod fingering;
 pub mod hands;
 pub mod musicxml;
 pub mod playback;
