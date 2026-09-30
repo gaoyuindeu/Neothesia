@@ -30,7 +30,12 @@ fn main() {
                         let notes: Vec<String> =
                             e.notes.iter().map(|n| n.pitch.to_string()).collect();
                         format!(
-                            "{}:{:?}{}{}{}",
+                            "{}{}:{:?}{}{}{}",
+                            if e.grace.is_empty() {
+                                String::new()
+                            } else {
+                                format!("g{}~", e.grace.len())
+                            },
                             e.tick - m.start_tick,
                             e.value,
                             ".".repeat(e.dots as usize),

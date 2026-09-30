@@ -24,6 +24,9 @@ const LEDGER_EXTENSION: f32 = 0.4;
 const BEAM_THICKNESS: f32 = 0.5;
 const BEAM_DISTANCE: f32 = 0.75;
 const BARLINE_WIDTH: f32 = 0.16;
+/// Grace notes are drawn at this size, this far apart
+const GRACE_SCALE: f32 = 0.65;
+const GRACE_SPACING: f32 = 1.6;
 /// Beam groups whose notes span more than this (in spaces) get stems in both directions
 const MIXED_BEAM_RANGE: f32 = 6.0;
 /// Keep symbols this far inside the panel
@@ -383,6 +386,7 @@ pub fn plan(score: &Score, index: usize, metrics: &Metrics, signature: Signature
         let mut right = 0.0;
         if !event.is_rest() {
             left += accidentals_width(event, staff);
+            left += event.grace.len() as f32 * GRACE_SPACING;
             if has_second(&positions(event, staff)) {
                 left += head;
                 right += head;
@@ -528,8 +532,9 @@ pub fn engrave(
         let voices = &measure.staves[staff].voices;
         for (v, voice) in voices.iter().enumerate() {
             let forced = (voices.len() == 2).then_some(v == 0);
+            let other = (voices.len() == 2).then(|| &voices[1 - v]);
             engrave_voice(
-                &mut out, voice, staff, v, forced, &x_of, width, metrics, options,
+                &mut out, voice, other, staff, v, forced, &x_of, width, metrics, options,
             );
         }
     }
@@ -589,6 +594,7 @@ pub fn engrave(
 fn engrave_voice(
     out: &mut Vec<Element>,
     voice: &Voice,
+    other: Option<&Voice>,
     staff: usize,
     v: usize,
     forced_up: Option<bool>,
@@ -632,7 +638,7 @@ fn engrave_voice(
     let mut chords: Vec<Option<Chord>> = Vec::with_capacity(voice.events.len());
     for (i, event) in voice.events.iter().enumerate() {
         if event.is_rest() {
-            rest(out, event, staff, forced_up, x_of, width);
+            rest(out, event, other, staff, forced_up, x_of, width);
             chords.push(None);
         } else {
             let x = x_of(event.tick);
@@ -763,6 +769,47 @@ fn chord(
         p -= 2;
     }
 
+    // Grace notes: small slashed notes before the chord (and its accidentals)
+    let accidental_room = accidentals_width(event, staff);
+    for (g, grace) in event.grace.iter().rev().enumerate() {
+        let bottom = STAVES[staff].bottom_line_step();
+        let p = grace.step - bottom - 7 * event.ottava as i32;
+        let gx = x + left - accidental_room - (g + 1) as f32 * GRACE_SPACING;
+        let ink = Ink::Note(NoteRef {
+            start: grace.start,
+            end: grace.end,
+            hand: hand_index(grace.hand, staff),
+        });
+        let mut ledger = if p >= 10 { 10 } else { -2 };
+        while (p >= 10 && ledger <= p) || (p <= -2 && ledger >= p) {
+            out.push(Element::Rect {
+                x: gx - 0.25,
+                y: pos_y(staff, ledger) - LEDGER_WIDTH / 2.0,
+                w: GRACE_SCALE * head + 0.5,
+                h: LEDGER_WIDTH,
+                ink: Ink::Plain,
+            });
+            ledger += if p >= 10 { 2 } else { -2 };
+        }
+        out.push(Element::Glyph {
+            c: glyphs::GRACE_ACCIACCATURA,
+            x: gx,
+            y: pos_y(staff, p),
+            size: GRACE_SCALE,
+            ink,
+        });
+        if let Some(accidental) = grace.accidental {
+            let c = accidental_glyph(accidental);
+            out.push(Element::Glyph {
+                c,
+                x: gx - metrics.accidental(c) * GRACE_SCALE - 0.15,
+                y: pos_y(staff, p),
+                size: GRACE_SCALE,
+                ink,
+            });
+        }
+    }
+
     // Heads
     for (i, &p) in pos.iter().enumerate() {
         out.push(Element::Glyph {
@@ -890,6 +937,7 @@ fn chord(
 fn rest(
     out: &mut Vec<Element>,
     event: &Event,
+    other: Option<&Voice>,
     staff: usize,
     forced_up: Option<bool>,
     x_of: &dyn Fn(u64) -> f32,
@@ -904,10 +952,26 @@ fn rest(
         NoteValue::Sixteenth => (glyphs::REST_16TH, 4),
         NoteValue::ThirtySecond => (glyphs::REST_32ND, 4),
     };
-    // With two voices, rests move out of the way of the other voice
+    // With two voices, rests move out of the way of the other voice's notes
+    // sounding at the same time
+    let (start, end) = (event.tick, event.tick + event.ticks);
+    let overlapping: Vec<i32> = other
+        .into_iter()
+        .flat_map(|v| v.events.iter())
+        .filter(|e| e.tick < end && e.tick + e.ticks > start)
+        .flat_map(|e| positions(e, staff))
+        .collect();
+    // Longer rests are drawn on lines
+    let even = |p: i32| if pos % 2 == 0 { p + p.rem_euclid(2) } else { p };
     match forced_up {
-        Some(true) => pos += 4,
-        Some(false) => pos -= 4,
+        Some(true) => {
+            let above = overlapping.iter().max().map_or(8, |&p| p + 4);
+            pos = even((pos + 4).max(above));
+        }
+        Some(false) => {
+            let below = overlapping.iter().min().map_or(0, |&p| p - 4);
+            pos = -even(-(pos - 4).min(below));
+        }
         None => {}
     }
     let x = if event.whole_measure_rest {

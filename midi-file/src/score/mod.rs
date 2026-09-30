@@ -164,6 +164,8 @@ pub struct Event {
     /// +1: written an octave lower under 8va, -1: an octave higher under 8vb
     pub ottava: i8,
     pub staccato: bool,
+    /// Grace notes written small before this chord
+    pub grace: Vec<ScoreNote>,
 }
 
 impl Event {
@@ -247,7 +249,7 @@ pub const MIN_GRID_ALIGNMENT: f32 = 0.65;
 impl Score {
     pub fn new(file: &MidiFile) -> Self {
         let ppq = file.ppq.max(1);
-        let (mut notes, grid_alignment) = analysis::collect(file, ppq);
+        let (mut notes, graces, grid_alignment) = analysis::collect(file, ppq);
         let last_tick = notes.iter().map(|n| n.raw_end).max().unwrap_or(0);
         let meters = analysis::meters(file, ppq, last_tick);
 
@@ -258,7 +260,9 @@ impl Score {
 
         let pedal = analysis::pedal(file, ppq);
 
-        let measures = notation::build(file, ppq, &meters, &notes, &voices, &tuplet_beats, &pedal);
+        let mut measures =
+            notation::build(file, ppq, &meters, &notes, &voices, &tuplet_beats, &pedal);
+        notation::attach_graces(&mut measures, &notes, &graces);
 
         Self {
             ppq,

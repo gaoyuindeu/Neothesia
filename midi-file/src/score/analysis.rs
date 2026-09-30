@@ -13,6 +13,9 @@ use crate::{Hand, MidiFile};
 #[derive(Debug, Clone)]
 pub(super) struct Note {
     pub staff: usize,
+    /// The hand's own staff; rhythm is analysed per hand, even for notes drawn
+    /// on the other staff
+    pub home: usize,
     pub hand: Option<Hand>,
     pub pitch: u8,
     pub raw_start: u64,
@@ -29,22 +32,90 @@ pub(super) struct Note {
 /// Staff follows the hand, except for notes far into the other hand's range,
 /// which would otherwise need a pile of ledger lines
 /// Without hand information the whole track goes to one staff by its average pitch.
-fn staff_for(hand: Option<Hand>, track_average: f32, pitch: u8) -> usize {
-    let upper = match hand {
-        Some(Hand::Right) => true,
-        Some(Hand::Left) => false,
-        None => track_average >= 60.0,
-    };
-    match upper {
-        true if pitch < 53 => 1,
-        true => 0,
-        false if pitch >= 67 => 0,
-        false => 1,
+/// The hand's own staff: 0 for the right hand (or a high track), 1 for the left
+fn home_staff(hand: Option<Hand>, track_average: f32) -> usize {
+    match hand {
+        Some(Hand::Right) => 0,
+        Some(Hand::Left) => 1,
+        None => usize::from(track_average < 60.0),
+    }
+}
+
+/// Notes far into the other hand's range go to the other staff
+fn staff_for(home: usize, pitch: u8) -> usize {
+    match home {
+        0 if pitch < 48 => 1,
+        1 if pitch >= 72 => 0,
+        home => home,
     }
 }
 
 /// All notes of the piece, sorted by start, and the fraction of them on a 16th/triplet grid
-pub(super) fn collect(file: &MidiFile, ppq: u16) -> (Vec<Note>, f32) {
+/// Ornament note played just before a main note, written small without taking time
+#[derive(Debug, Clone)]
+pub(super) struct Grace {
+    pub staff: usize,
+    pub pitch: u8,
+    pub hand: Option<Hand>,
+    pub start_time: Duration,
+    pub end_time: Duration,
+    /// The main note: (raw start, pitch)
+    pub main: (u64, u8),
+}
+
+/// Take out grace notes: single very short notes off the 16th grid, right before a
+/// longer note on the grid. `notes` must be sorted by (staff, start).
+fn take_graces(notes: Vec<Note>, ppq: u16) -> (Vec<Note>, Vec<Grace>) {
+    let ppq = ppq as u64;
+    let sixteenth = (ppq / 4).max(1);
+    let tolerance = (ppq / 32).max(1);
+    let on_grid = |t: u64| {
+        let r = t % sixteenth;
+        r <= tolerance || sixteenth - r <= tolerance
+    };
+
+    let mut graces = Vec::new();
+    let mut keep = vec![true; notes.len()];
+    for i in 0..notes.len() {
+        let n = &notes[i];
+        // Sorted, so notes with the same onset are neighbours
+        let same_onset = |o: &Note| o.staff == n.staff && o.raw_start == n.raw_start;
+        let alone =
+            !(i > 0 && same_onset(&notes[i - 1])) && !notes.get(i + 1).is_some_and(same_onset);
+        let Some(main) = notes[i + 1..]
+            .iter()
+            .find(|m| m.staff == n.staff && m.raw_start > n.raw_start)
+        else {
+            continue;
+        };
+        let is_grace = alone
+            && n.raw_end - n.raw_start <= ppq / 8
+            && !on_grid(n.raw_start)
+            && on_grid(main.raw_start)
+            && main.raw_start - n.raw_start <= ppq / 6
+            && main.raw_end - main.raw_start >= ppq / 4;
+        if is_grace {
+            keep[i] = false;
+            graces.push(Grace {
+                staff: n.staff,
+                pitch: n.pitch,
+                hand: n.hand,
+                start_time: n.start_time,
+                end_time: n.end_time,
+                main: (main.raw_start, main.pitch),
+            });
+        }
+    }
+
+    let notes = notes
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(n, k)| k.then_some(n))
+        .collect();
+    (notes, graces)
+}
+
+pub(super) fn collect(file: &MidiFile, ppq: u16) -> (Vec<Note>, Vec<Grace>, f32) {
     let sixteenth = (ppq as f64 / 4.0).max(1.0);
     let triplet = (ppq as f64 / 3.0).max(1.0);
     let tolerance = (ppq as f64 / 32.0).max(1.0);
@@ -68,7 +139,8 @@ pub(super) fn collect(file: &MidiFile, ppq: u16) -> (Vec<Note>, f32) {
                 aligned += 1;
             }
             notes.push(Note {
-                staff: staff_for(track.hand, average, note.note),
+                staff: staff_for(home_staff(track.hand, average), note.note),
+                home: home_staff(track.hand, average),
                 hand: track.hand,
                 pitch: note.note,
                 raw_start: note.start_tick,
@@ -101,9 +173,10 @@ pub(super) fn collect(file: &MidiFile, ppq: u16) -> (Vec<Note>, f32) {
         }
     }
 
-    let mut notes = fold_trills(notes, ppq);
+    let notes = fold_trills(notes, ppq);
+    let (mut notes, graces) = take_graces(notes, ppq);
     notes.sort_by_key(|n| (n.raw_start, n.pitch));
-    (notes, alignment)
+    (notes, graces, alignment)
 }
 
 /// Scores often contain trills written out as fast alternating notes. Fold runs of 6+
@@ -277,7 +350,14 @@ pub(super) fn quantize(notes: &mut [Note], meters: &[Meter], ppq: u16) -> [Vec<T
         let list: &[(u64, bool)] = if compound {
             &[(3, false), (6, false), (12, false)]
         } else {
-            &[(2, false), (4, false), (3, true), (8, false), (6, true)]
+            &[
+                (2, false),
+                (4, false),
+                (3, true),
+                (8, false),
+                (6, true),
+                (12, true),
+            ]
         };
         list.iter()
             .map(|&(div, triplet)| ((beat / div).max(1), triplet))
@@ -289,7 +369,7 @@ pub(super) fn quantize(notes: &mut [Note], meters: &[Meter], ppq: u16) -> [Vec<T
     for staff in 0..2 {
         // Onsets per beat
         let mut beats: BTreeMap<u64, (u64, bool, Vec<u64>)> = BTreeMap::new();
-        for note in notes.iter().filter(|n| n.staff == staff) {
+        for note in notes.iter().filter(|n| n.home == staff) {
             if let Some((start, len, compound)) = beat_of(note.raw_start) {
                 beats
                     .entry(start)
@@ -354,7 +434,7 @@ pub(super) fn quantize(notes: &mut [Note], meters: &[Meter], ppq: u16) -> [Vec<T
             (start as i64 + snapped).max(0) as u64
         };
 
-        for note in notes.iter_mut().filter(|n| n.staff == staff) {
+        for note in notes.iter_mut().filter(|n| n.home == staff) {
             note.start = snap(note.raw_start);
             note.end = snap(note.raw_end);
             if note.end <= note.start {

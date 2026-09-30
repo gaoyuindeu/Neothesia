@@ -29,6 +29,8 @@ pub const FLAG_DOWN: [char; 3] = ['\u{E241}', '\u{E243}', '\u{E245}'];
 pub const OTTAVA_ALTA: char = '\u{E511}';
 pub const OTTAVA_BASSA: char = '\u{E51C}';
 pub const TRILL: char = '\u{E566}';
+/// Small note with a slashed stem
+pub const GRACE_ACCIACCATURA: char = '\u{E560}';
 
 pub fn time_sig_digit(d: u32) -> char {
     char::from_u32(0xE080 + d.min(9)).unwrap()

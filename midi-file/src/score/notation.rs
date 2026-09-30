@@ -6,7 +6,7 @@ use std::{cmp::Reverse, collections::HashMap};
 use super::{
     Accidental, Beam, Event, Measure, NoteValue, PedalSpan, STAVES, ScoreNote, StaffMeasure,
     Tuplet, Voice,
-    analysis::{Meter, Note, Span, TupletBeat},
+    analysis::{Grace, Meter, Note, Span, TupletBeat},
 };
 use crate::MidiFile;
 
@@ -255,6 +255,7 @@ fn build_voice(
                 whole_measure_rest: true,
                 ottava: 0,
                 staccato: false,
+                grace: Vec::new(),
             }],
             ..Default::default()
         });
@@ -351,6 +352,7 @@ fn build_voice(
                 whole_measure_rest: false,
                 ottava: 0,
                 staccato,
+                grace: Vec::new(),
             });
             tuplet_of_event.push(piece.tuplet);
         }
@@ -368,7 +370,7 @@ fn build_voice(
             let index = tuplets.len();
             let sextuplet = local_tuplets
                 .iter()
-                .any(|t| t.start == beat && t.divisions == 6)
+                .any(|t| t.start == beat && t.divisions >= 6)
                 && j - i + 1 > 3;
             tuplets.push(Tuplet {
                 actual: if sextuplet { 6 } else { 3 },
@@ -665,4 +667,46 @@ pub(super) fn build(
 
     ottava(&mut measures);
     measures
+}
+
+/// Hang grace notes on the chord of their main note
+pub(super) fn attach_graces(measures: &mut [Measure], notes: &[Note], graces: &[Grace]) {
+    for grace in graces {
+        let Some(main) = notes
+            .iter()
+            .find(|n| n.staff == grace.staff && (n.raw_start, n.pitch) == grace.main)
+        else {
+            continue;
+        };
+        let i = measures.partition_point(|m| m.start_tick <= main.start);
+        let Some(measure) = i.checked_sub(1).and_then(|i| measures.get_mut(i)) else {
+            continue;
+        };
+        let key = measure.key;
+        let event = measure.staves[grace.staff]
+            .voices
+            .iter_mut()
+            .flat_map(|v| v.events.iter_mut())
+            .find(|e| e.tick == main.start && !e.is_rest());
+        let Some(event) = event else { continue };
+
+        let (step, alter) = spell(grace.pitch, key);
+        let key_alter = Spelling::new(key).key_alters[step.rem_euclid(7) as usize];
+        event.grace.push(ScoreNote {
+            pitch: grace.pitch,
+            step,
+            alter,
+            accidental: (alter != key_alter).then_some(match alter {
+                1 => Accidental::Sharp,
+                -1 => Accidental::Flat,
+                _ => Accidental::Natural,
+            }),
+            start: grace.start_time,
+            end: grace.end_time,
+            hand: grace.hand,
+            tie_from_prev: false,
+            tie_to_next: false,
+            trill: false,
+        });
+    }
 }
