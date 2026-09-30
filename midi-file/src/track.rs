@@ -1,7 +1,7 @@
 use midly::{MidiMessage, TrackEvent, TrackEventKind, num::u4};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use crate::tempo_track::TempoTrack;
+use crate::{hands::Hand, tempo_track::TempoTrack};
 
 #[derive(Debug, Clone)]
 pub struct MidiEvent {
@@ -44,6 +44,9 @@ pub struct MidiTrack {
     pub programs: Arc<[ProgramEvent]>,
     pub has_drums: bool,
     pub has_other_than_drums: bool,
+
+    /// Which hand plays this track, if known
+    pub hand: Option<Hand>,
 }
 
 impl MidiTrack {
@@ -72,6 +75,7 @@ impl MidiTrack {
             programs: programs.into(),
             has_drums,
             has_other_than_drums,
+            hand: None,
         }
     }
 }

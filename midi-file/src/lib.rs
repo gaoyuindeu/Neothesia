@@ -1,10 +1,12 @@
 mod file;
+pub mod hands;
 pub mod playback;
 pub mod program_track;
 pub mod tempo_track;
 mod track;
 
 pub use file::*;
+pub use hands::Hand;
 pub use midly;
 pub use playback::*;
 pub use track::*;

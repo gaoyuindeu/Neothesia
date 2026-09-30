@@ -68,6 +68,8 @@ impl MidiFile {
             })
             .collect();
 
+        let tracks = crate::hands::assign_hands(tracks);
+
         let measures = {
             let last_note_end = tracks
                 .iter()

@@ -178,6 +178,11 @@ fn track_card(
 
     let title = if track.has_drums && !track.has_other_than_drums {
         "Percussion"
+    } else if let Some(hand) = track.hand {
+        match hand {
+            midi_file::Hand::Left => "Left Hand",
+            midi_file::Hand::Right => "Right Hand",
+        }
     } else {
         let instrument_id = track
             .programs
