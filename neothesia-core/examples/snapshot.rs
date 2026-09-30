@@ -189,6 +189,31 @@ fn main() {
         text.update(neothesia_core::dpi::PhysicalSize::new(WIDTH, HEIGHT), 1.0);
         if let Some(sheet) = sheet.as_mut() {
             let song_time = playback.time().saturating_sub(*playback.leed_in());
+            // SHEET_BENCH=<scale>: time the per-frame sheet update over 5 seconds of music
+            if let Some(scale) = std::env::var("SHEET_BENCH")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+            {
+                let start = std::time::Instant::now();
+                let frames = 300;
+                for f in 0..frames {
+                    sheet.update(
+                        song_time + frame * f,
+                        (
+                            0.0,
+                            0.0,
+                            WIDTH as f32 / scale,
+                            SheetRenderer::height_for(13.0 / scale),
+                        ),
+                        neothesia_core::dpi::PhysicalSize::new(WIDTH, HEIGHT),
+                        scale,
+                    );
+                }
+                println!(
+                    "sheet update at scale {scale}: {:.2} ms/frame",
+                    start.elapsed().as_secs_f64() * 1000.0 / frames as f64
+                );
+            }
             sheet.update(
                 song_time,
                 (0.0, 0.0, WIDTH as f32, SheetRenderer::height_for(13.0)),

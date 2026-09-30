@@ -106,11 +106,12 @@ pub(super) fn collect(file: &MidiFile, ppq: u16) -> (Vec<Note>, f32) {
     (notes, alignment)
 }
 
-/// Scores often contain trills written out as fast alternating notes. Fold runs of 5+
-/// short notes alternating between two pitches a step apart into one trilled note.
+/// Scores often contain trills written out as fast alternating notes. Fold runs of 6+
+/// notes faster than 16ths, alternating between two pitches a step apart, into one
+/// trilled note. (Slower alternations, like the start of Für Elise, are real notes.)
 /// `notes` must be sorted by (staff, start).
 fn fold_trills(notes: Vec<Note>, ppq: u16) -> Vec<Note> {
-    let max_gap = (ppq as u64 / 4).max(1);
+    let max_gap = (ppq as u64 / 6).max(1);
     let mut out: Vec<Note> = Vec::with_capacity(notes.len());
     let mut i = 0;
     while i < notes.len() {
@@ -128,7 +129,7 @@ fn fold_trills(notes: Vec<Note>, ppq: u16) -> Vec<Note> {
             j += 1;
         }
 
-        if j - i + 1 >= 5 {
+        if j - i + 1 >= 6 {
             let run = &notes[i..=j];
             let main = run[0].pitch.min(run[1].pitch);
             out.push(Note {
@@ -404,21 +405,28 @@ pub(super) fn voices(notes: &[Note], staff: usize, ppq: u16) -> [Vec<Span>; 2] {
                 Some(n.end.div_ceil(grid) * grid)
             });
 
-        // Clearly shorter than written (judged on the real length, which the grid may hide)
-        let is_staccato = |written: u64| {
-            let sounding = n.raw_end.saturating_sub(n.raw_start);
-            written <= ppq && (sounding as f64) <= 0.55 * written as f64
-        };
+        // Real sounding length relative to the distance to the next onset
+        // (the quantized end may hide it)
+        let sounding = n.raw_end.saturating_sub(n.raw_start) as f64;
+        let ratio = |next: u64| sounding / (next - n.start).max(1) as f64;
 
         let (end, staccato) = match next {
+            // Held well past the next onset: sustained
             Some(next) if n.end >= next + (ppq / 4).max(next - n.start) => (n.end, false),
-            Some(next) if n.end >= next => (next, is_staccato(next - n.start)),
+            Some(next) if n.end >= next => (next, ratio(next) <= 0.6 && next - n.start <= ppq / 2),
             Some(next) => {
+                let r = ratio(next);
+                let span = next - n.start;
                 let gap = next - n.end;
-                let len = n.end - n.start;
-                if gap < len || gap <= ppq / 4 {
-                    (next, is_staccato(next - n.start))
+                if r >= 0.8 || gap <= ppq / 8 {
+                    // Legato, the gap is just imprecision
+                    (next, false)
+                } else if (0.3..=0.6).contains(&r) && span <= ppq / 2 {
+                    // Clearly detached short note: staccato, not a rest.
+                    // (Longer spans are usually written as a note and a rest)
+                    (next, true)
                 } else {
+                    // A written rest
                     (n.end, false)
                 }
             }
