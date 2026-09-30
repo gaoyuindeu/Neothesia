@@ -13,8 +13,9 @@ fn main() {
 
     for m in score.measures.iter().skip(first).take(count) {
         println!(
-            "measure {} ticks {}..{} time {:?} key {}",
+            "measure {} at {:.2}s ticks {}..{} time {:?} key {}",
             m.index + 1,
+            m.start.as_secs_f64(),
             m.start_tick,
             m.end_tick,
             m.time_signature,

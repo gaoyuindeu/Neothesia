@@ -537,6 +537,53 @@ fn ottava(measures: &mut [Measure]) {
     }
 }
 
+/// A voice whose notes all line up (same start and length) with events of the other
+/// voice is just part of its chords. Fold it in when the other voice covers the whole
+/// measure, so no rests go missing.
+fn merge_voices(staff: &mut StaffMeasure, m: &Meter) {
+    if staff.voices.len() != 2 {
+        return;
+    }
+    let covers_measure = |voice: &Voice| {
+        let mut t = m.start;
+        for e in &voice.events {
+            if e.tick != t {
+                return false;
+            }
+            t += e.ticks;
+        }
+        t == m.end()
+    };
+    let lines_up = |sparse: &Voice, full: &Voice| {
+        sparse.events.iter().filter(|e| !e.is_rest()).all(|e| {
+            full.events
+                .iter()
+                .any(|f| !f.is_rest() && f.tick == e.tick && f.ticks == e.ticks)
+        })
+    };
+
+    for (sparse, full) in [(1, 0), (0, 1)] {
+        if !lines_up(&staff.voices[sparse], &staff.voices[full])
+            || !covers_measure(&staff.voices[full])
+        {
+            continue;
+        }
+        let from = staff.voices.remove(sparse);
+        let target = &mut staff.voices[0];
+        for event in from.events.into_iter().filter(|e| !e.is_rest()) {
+            let f = target
+                .events
+                .iter_mut()
+                .find(|f| !f.is_rest() && f.tick == event.tick && f.ticks == event.ticks)
+                .unwrap();
+            f.staccato &= event.staccato;
+            f.notes.extend(event.notes);
+            f.notes.sort_by_key(|n| n.pitch);
+        }
+        return;
+    }
+}
+
 /// Whether the second voice sits higher than the first within this measure
 fn upper_is_second(voices: &[Vec<Span>; 2], m: &Meter, notes: &[Note]) -> bool {
     let average = |spans: &Vec<Span>| {
@@ -584,6 +631,7 @@ pub(super) fn build(
                         staff_measure.voices.push(voice);
                     }
                 }
+                merge_voices(&mut staff_measure, m);
                 accidentals(&mut staff_measure, m.key);
                 staff_measure
             });

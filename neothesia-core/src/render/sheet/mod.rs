@@ -13,7 +13,9 @@ use midi_file::score::Score;
 use wgpu_jumpstart::Color;
 
 use self::{
-    engrave::{Element, Engraved, Ink, MeasurePlan, Options, PANEL_HEIGHT, STAFF_BOTTOM},
+    engrave::{
+        Element, Engraved, Ink, MeasurePlan, Options, PANEL_HEIGHT, STAFF_BOTTOM, Signature,
+    },
     glyphs::Metrics,
 };
 use super::{QuadInstance, QuadRenderer, TextRenderer};
@@ -45,12 +47,12 @@ pub struct SheetRenderer {
     glyphs: GlyphCache,
     colors: SheetColors,
     metrics: Metrics,
-    /// Natural spacing of every measure: [without, with] key/time changes drawn inline
-    plans: Vec<[MeasurePlan; 2]>,
+    /// Natural spacing of every measure, with its key/time changes drawn inline
+    plans: Vec<MeasurePlan>,
     header_width: f32,
     pages: Option<Pages>,
     /// Engraved measures by (index, width, options)
-    cache: HashMap<(usize, u32, bool, bool), Engraved>,
+    cache: HashMap<(usize, u32, bool, Signature), Engraved>,
 }
 
 impl SheetRenderer {
@@ -59,7 +61,10 @@ impl SheetRenderer {
         let metrics = measure_metrics(&mut glyphs);
 
         let plans = (0..score.measures.len())
-            .map(|i| [false, true].map(|changes| engrave::plan(&score, i, &metrics, changes)))
+            .map(|i| {
+                let signature = Signature::changes(&score.measures[i]);
+                engrave::plan(&score, i, &metrics, signature)
+            })
             .collect();
 
         // Room for the clefs, the widest key signature and a time signature
@@ -99,7 +104,7 @@ impl SheetRenderer {
     }
 
     fn natural_width(&self, index: usize) -> f32 {
-        self.plans[index][1].natural_width
+        self.plans[index].natural_width
     }
 
     fn paginate(&mut self, half_width: f32) {
@@ -216,6 +221,7 @@ impl SheetRenderer {
             ink: Ink::Plain,
         });
         let measure = &self.score.measures[header_measure];
+        let (header_key, header_time) = (measure.key, measure.time_signature);
         let mut hx = clef_x + self.metrics.clef + 0.8;
         hx += engrave::key_signature(&mut header, hx, measure.key, None, &self.metrics);
         if measure.index == 0 || measure.time_signature_changed {
@@ -232,29 +238,36 @@ impl SheetRenderer {
                 continue;
             };
             let natural: f32 = (first..first + count)
-                .map(|m| self.plans[m][1].natural_width)
+                .map(|m| self.plans[m].natural_width)
                 .sum();
             let factor = half_width / natural.max(0.1);
 
             let mut mx = slot_x;
             for i in 0..count {
                 let index = first + i;
+                let measure = &self.score.measures[index];
+                let signature = match (slot, i) {
+                    // The header shows the key/time of the left half's first measure
+                    (0, 0) => Signature::default(),
+                    // The right half may be in another key than the header says
+                    (_, 0) => Signature {
+                        key: (measure.key != header_key).then_some((measure.key, Some(header_key))),
+                        time: (measure.time_signature != header_time
+                            || measure.time_signature_changed)
+                            .then_some(measure.time_signature),
+                    },
+                    _ => Signature::changes(measure),
+                };
                 let options = Options {
-                    // The header already shows the key/time of the left half's first measure
-                    show_changes: !(slot == 0 && i == 0),
+                    signature,
                     first_in_half: i == 0,
                     last_measure: index + 1 == self.score.measures.len(),
                 };
-                let plan = &self.plans[index][options.show_changes as usize];
-                let w = self.plans[index][1].natural_width * factor;
-                let key = (
-                    index,
-                    (w * 100.0).round() as u32,
-                    options.show_changes,
-                    options.first_in_half,
-                );
+                let w = self.plans[index].natural_width * factor;
+                let key = (index, (w * 100.0).round() as u32, i == 0, signature);
                 let engraved = self.cache.entry(key).or_insert_with(|| {
-                    engrave::engrave(&self.score, index, plan, w, &self.metrics, options)
+                    let plan = engrave::plan(&self.score, index, &self.metrics, signature);
+                    engrave::engrave(&self.score, index, &plan, w, &self.metrics, options)
                 });
 
                 for element in &engraved.elements {

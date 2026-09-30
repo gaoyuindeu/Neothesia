@@ -24,6 +24,8 @@ const LEDGER_EXTENSION: f32 = 0.4;
 const BEAM_THICKNESS: f32 = 0.5;
 const BEAM_DISTANCE: f32 = 0.75;
 const BARLINE_WIDTH: f32 = 0.16;
+/// Beam groups whose notes span more than this (in spaces) get stems in both directions
+const MIXED_BEAM_RANGE: f32 = 6.0;
 /// Keep symbols this far inside the panel
 const PANEL_MARGIN: f32 = 1.0;
 
@@ -118,8 +120,8 @@ pub struct Engraved {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Options {
-    /// Draw key/time signature changes at the start of the measure
-    pub show_changes: bool,
+    /// Key/time signature drawn at the start of the measure
+    pub signature: Signature,
     /// First measure of a half page (ties from the left get a stub, the number is shown)
     pub first_in_half: bool,
     pub last_measure: bool,
@@ -302,15 +304,33 @@ pub fn time_signature(out: &mut Vec<Element>, x: f32, time: (u8, u8), metrics: &
     width
 }
 
-fn changes_width(measure: &Measure, metrics: &Metrics) -> f32 {
-    let mut width = 0.0;
-    if let Some(previous) = measure.previous_key {
-        width += key_signature_width(measure.key, Some(previous), metrics);
+/// Key (new key, key it replaces) and time signature shown at the start of a measure
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Signature {
+    pub key: Option<(i8, Option<i8>)>,
+    pub time: Option<(u8, u8)>,
+}
+
+impl Signature {
+    /// The changes that happen at this measure
+    pub fn changes(measure: &Measure) -> Self {
+        Self {
+            key: measure.previous_key.map(|p| (measure.key, Some(p))),
+            time: measure
+                .time_signature_changed
+                .then_some(measure.time_signature),
+        }
     }
-    if measure.time_signature_changed {
-        width += time_signature_width(measure.time_signature, metrics);
+
+    fn width(&self, metrics: &Metrics) -> f32 {
+        let key = self.key.map_or(0.0, |(key, previous)| {
+            key_signature_width(key, previous, metrics)
+        });
+        let time = self
+            .time
+            .map_or(0.0, |time| time_signature_width(time, metrics));
+        key + time
     }
-    width
 }
 
 /// Space for a duration: grows with the logarithm of the length
@@ -336,14 +356,9 @@ fn is_beamed(voice: &Voice, event: &Event) -> bool {
     index.is_some_and(|i| voice.beams.iter().any(|b| b.first <= i && i <= b.last))
 }
 
-pub fn plan(score: &Score, index: usize, metrics: &Metrics, show_changes: bool) -> MeasurePlan {
+pub fn plan(score: &Score, index: usize, metrics: &Metrics, signature: Signature) -> MeasurePlan {
     let measure = &score.measures[index];
-    let lead = 1.0
-        + if show_changes {
-            changes_width(measure, metrics)
-        } else {
-            0.0
-        };
+    let lead = 1.0 + signature.width(metrics);
 
     let mut ticks: Vec<u64> = events_at(measure).map(|(_, _, e, _)| e.tick).collect();
     ticks.sort_unstable();
@@ -485,13 +500,13 @@ pub fn engrave(
     ticks.push((measure.end_tick, width));
 
     // Key / time changes at the start
-    if options.show_changes {
+    {
         let mut x = 0.6;
-        if let Some(previous) = measure.previous_key {
-            x += key_signature(&mut out, x, measure.key, Some(previous), metrics);
+        if let Some((key, previous)) = options.signature.key {
+            x += key_signature(&mut out, x, key, previous, metrics);
         }
-        if measure.time_signature_changed {
-            time_signature(&mut out, x, measure.time_signature, metrics);
+        if let Some(time) = options.signature.time {
+            time_signature(&mut out, x, time, metrics);
         }
     }
 
@@ -588,14 +603,29 @@ fn engrave_voice(
         .iter()
         .map(|e| forced_up.unwrap_or_else(|| stem_up_for(&positions(e, staff))))
         .collect();
+    // Beams spanning a very wide range sit between the notes, stems pointing at them
+    let mut mixed: Vec<Option<f32>> = vec![None; voice.beams.len()];
     if forced_up.is_none() {
-        for beam in &voice.beams {
+        for (b, beam) in voice.beams.iter().enumerate() {
             let all: Vec<i32> = voice.events[beam.first..=beam.last]
                 .iter()
                 .flat_map(|e| positions(e, staff))
                 .collect();
-            let dir = stem_up_for(&all);
-            up[beam.first..=beam.last].iter_mut().for_each(|u| *u = dir);
+            let (Some(&low), Some(&high)) = (all.iter().min(), all.iter().max()) else {
+                continue;
+            };
+            if pos_y(staff, low) - pos_y(staff, high) > MIXED_BEAM_RANGE {
+                let middle = (pos_y(staff, low) + pos_y(staff, high)) / 2.0;
+                mixed[b] = Some(middle);
+                for i in beam.first..=beam.last {
+                    let chord_low = positions(&voice.events[i], staff).first().copied();
+                    // Chords below the beam point up to it
+                    up[i] = chord_low.is_some_and(|p| pos_y(staff, p) > middle);
+                }
+            } else {
+                let dir = stem_up_for(&all);
+                up[beam.first..=beam.last].iter_mut().for_each(|u| *u = dir);
+            }
         }
     }
 
@@ -611,8 +641,11 @@ fn engrave_voice(
     }
 
     // Beams set the stem tips of their chords
-    for beam in &voice.beams {
-        beam_group(out, voice, beam.first, beam.last, &mut chords, staff);
+    for (beam, mixed) in voice.beams.iter().zip(&mixed) {
+        match mixed {
+            Some(middle) => mixed_beam_group(out, beam.first, beam.last, &mut chords, *middle),
+            None => beam_group(out, voice, beam.first, beam.last, &mut chords, staff),
+        }
     }
 
     // Stems and flags
@@ -900,6 +933,94 @@ fn rest(
     }
 }
 
+/// A beam is lit from the start of its first chord to the end of its last one
+fn group_ink(first: Ink, last: Ink) -> Ink {
+    match (first, last) {
+        (Ink::Note(a), Ink::Note(b)) => Ink::Note(NoteRef {
+            start: a.start,
+            end: b.end.max(a.end),
+            hand: a.hand,
+        }),
+        (ink, _) => ink,
+    }
+}
+
+/// Horizontal beam between high and low notes; stems point at it from both sides
+fn mixed_beam_group(
+    out: &mut Vec<Element>,
+    first: usize,
+    last: usize,
+    chords: &mut [Option<Chord>],
+    middle: f32,
+) {
+    let members: Vec<usize> = (first..=last).filter(|&i| chords[i].is_some()).collect();
+    if members.len() < 2 {
+        return;
+    }
+    let levels = members
+        .iter()
+        .map(|&i| chords[i].as_ref().unwrap().flags)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    // Primary beam on top, the others stacked below it
+    let top = middle - BEAM_THICKNESS / 2.0;
+    let bottom = top + BEAM_DISTANCE * (levels - 1) as f32 + BEAM_THICKNESS;
+
+    for &i in &members {
+        let chord = chords[i].as_mut().unwrap();
+        chord.tip = if chord.up { top } else { bottom };
+    }
+
+    let ink = group_ink(
+        chords[members[0]].as_ref().unwrap().ink,
+        chords[*members.last().unwrap()].as_ref().unwrap().ink,
+    );
+    let x_of = |i: usize| chords[i].as_ref().unwrap().stem_x;
+    let flags_of = |i: usize| chords[i].as_ref().unwrap().flags;
+    let x0 = x_of(members[0]);
+    let x1 = x_of(*members.last().unwrap()) + STEM_WIDTH;
+    out.push(Element::Beam {
+        x0,
+        y0: top,
+        x1,
+        y1: top,
+        thickness: BEAM_THICKNESS,
+        ink,
+    });
+    for level in 2..=levels {
+        let y = top + BEAM_DISTANCE * (level - 1) as f32;
+        let mut k = 0;
+        while k < members.len() {
+            if flags_of(members[k]) < level {
+                k += 1;
+                continue;
+            }
+            let mut j = k;
+            while j + 1 < members.len() && flags_of(members[j + 1]) >= level {
+                j += 1;
+            }
+            let xa = x_of(members[k]);
+            let (a, b) = if j > k {
+                (xa, x_of(members[j]) + STEM_WIDTH)
+            } else if k + 1 < members.len() {
+                (xa, xa + 1.1)
+            } else {
+                (xa - 1.1 + STEM_WIDTH, xa + STEM_WIDTH)
+            };
+            out.push(Element::Beam {
+                x0: a,
+                y0: y,
+                x1: b,
+                y1: y,
+                thickness: BEAM_THICKNESS,
+                ink,
+            });
+            k = j + 1;
+        }
+    }
+}
+
 fn beam_group(
     out: &mut Vec<Element>,
     voice: &Voice,
@@ -1008,7 +1129,7 @@ fn beam_group(
         chord.tip = line(chord.stem_x);
     }
 
-    let ink = get(members[0]).ink;
+    let ink = group_ink(get(members[0]).ink, get(*members.last().unwrap()).ink);
     let band = |out: &mut Vec<Element>, xa: f32, xb: f32, level: u8| {
         let offset = -dir * BEAM_DISTANCE * (level - 1) as f32;
         // Top edge: the beam grows from the tip towards the notes
@@ -1336,6 +1457,85 @@ fn pedal(out: &mut Vec<Element>, measure: &Measure, ticks: &[(u64, f32)], width:
                 h: 0.9 + 0.12,
                 ink: Ink::Dim,
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accidentals_stack_when_close() {
+        // A third apart: two columns; an octave apart: one column is enough
+        assert_eq!(
+            accidental_columns(&[(4, glyphs::SHARP), (6, glyphs::SHARP)]),
+            vec![1, 0]
+        );
+        assert_eq!(
+            accidental_columns(&[(0, glyphs::FLAT), (7, glyphs::FLAT)]),
+            vec![0, 0]
+        );
+    }
+
+    #[test]
+    fn stem_direction_follows_the_farthest_note() {
+        assert!(stem_up_for(&[0, 2]));
+        assert!(!stem_up_for(&[6, 8]));
+        // Middle line goes down
+        assert!(!stem_up_for(&[4]));
+        // Chord: the note farther from the middle line decides
+        assert!(!stem_up_for(&[3, 10]));
+    }
+
+    #[test]
+    fn key_change_cancels_old_accidentals() {
+        // 3 sharps to 1 sharp: 2 naturals; sharps to flats: all sharps cancelled
+        assert_eq!(cancelled_count(3, 1), 2);
+        assert_eq!(cancelled_count(2, -2), 2);
+        assert_eq!(cancelled_count(0, 4), 0);
+
+        let metrics = Metrics::default();
+        let mut out = Vec::new();
+        key_signature(&mut out, 0.0, -2, Some(1), &metrics);
+        let naturals = out
+            .iter()
+            .filter(|e| matches!(e, Element::Glyph { c, .. } if *c == glyphs::NATURAL))
+            .count();
+        let flats = out
+            .iter()
+            .filter(|e| matches!(e, Element::Glyph { c, .. } if *c == glyphs::FLAT))
+            .count();
+        // One natural and two flats, on both staves
+        assert_eq!((naturals, flats), (2, 4));
+    }
+
+    #[test]
+    fn ticks_map_to_x_linearly_between_columns() {
+        let engraved = Engraved {
+            elements: Vec::new(),
+            ticks: vec![(0, 0.0), (480, 10.0), (960, 30.0)],
+        };
+        assert_eq!(x_at(&engraved, 240.0), 5.0);
+        assert_eq!(x_at(&engraved, 720.0), 20.0);
+        assert_eq!(x_at(&engraved, 2000.0), 30.0);
+    }
+
+    #[test]
+    fn beam_ink_spans_the_group() {
+        let a = NoteRef {
+            start: Duration::from_secs(1),
+            end: Duration::from_secs(2),
+            hand: 0,
+        };
+        let b = NoteRef {
+            start: Duration::from_secs(3),
+            end: Duration::from_secs(4),
+            hand: 0,
+        };
+        match group_ink(Ink::Note(a), Ink::Note(b)) {
+            Ink::Note(n) => assert_eq!((n.start, n.end), (a.start, b.end)),
+            other => panic!("{other:?}"),
         }
     }
 }
