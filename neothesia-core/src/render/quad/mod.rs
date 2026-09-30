@@ -113,26 +113,25 @@ pub struct QuadRenderer {
 impl<'a> QuadRenderer {
     #[profiling::function]
     pub fn render(&'a self, render_pass: &mut wgpu_jumpstart::RenderPass<'a>) {
-        let pass_size = render_pass.size();
         let scissor_rect = self.scissor_rect;
         let has_scissor_rect = scissor_rect != Rect::zero();
 
         if has_scissor_rect {
-            render_pass.set_scissor_rect(
+            render_pass.set_view_scissor(
                 scissor_rect.origin.x,
                 scissor_rect.origin.y,
                 scissor_rect.size.width,
                 scissor_rect.size.height,
             );
         } else {
-            render_pass.set_scissor_rect(0, 0, pass_size.width, pass_size.height);
+            render_pass.reset_view_scissor();
         }
 
         self.pipeline.render(render_pass, &self.quads);
 
         // Revert
         if has_scissor_rect {
-            render_pass.set_scissor_rect(0, 0, pass_size.width, pass_size.height);
+            render_pass.reset_view_scissor();
         }
     }
 

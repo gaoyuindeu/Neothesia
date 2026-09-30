@@ -156,7 +156,7 @@ impl TextRenderer {
         buffer.set_text(
             text,
             &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-            glyphon::Shaping::Basic,
+            shaping_for(text),
             None,
         );
         buffer.shape_until_scroll(font_system, false);
@@ -299,19 +299,18 @@ impl TextRenderer {
     }
 
     pub fn render<'rpass>(&'rpass self, render_pass: &mut wgpu_jumpstart::RenderPass<'rpass>) {
-        let pass_size = render_pass.size();
         let scissor_rect = self.scissor_rect;
         let has_scissor_rect = scissor_rect != Rect::zero();
 
         if has_scissor_rect {
-            render_pass.set_scissor_rect(
+            render_pass.set_view_scissor(
                 scissor_rect.origin.x,
                 scissor_rect.origin.y,
                 scissor_rect.size.width,
                 scissor_rect.size.height,
             );
         } else {
-            render_pass.set_scissor_rect(0, 0, pass_size.width, pass_size.height);
+            render_pass.reset_view_scissor();
         }
 
         let shared = self.shared.borrow();
@@ -321,7 +320,7 @@ impl TextRenderer {
 
         // Revert
         if has_scissor_rect {
-            render_pass.set_scissor_rect(0, 0, pass_size.width, pass_size.height);
+            render_pass.reset_view_scissor();
         }
     }
 }
@@ -347,7 +346,7 @@ impl TextRenderer {
         let mut buffer =
             cosmic_text::Buffer::new(font_system, cosmic_text::Metrics::new(size, size));
         buffer.set_size(Some(f32::MAX), Some(f32::MAX));
-        buffer.set_text(text, &attrs, cosmic_text::Shaping::Basic, None);
+        buffer.set_text(text, &attrs, shaping_for(text), None);
         buffer.shape_until_scroll(font_system, false);
         buffer
     }
@@ -379,7 +378,7 @@ impl TextRenderer {
         let mut buffer =
             cosmic_text::Buffer::new(font_system, cosmic_text::Metrics::new(size, size));
         buffer.set_size(Some(f32::MAX), Some(f32::MAX));
-        buffer.set_rich_text(spans, &attrs, cosmic_text::Shaping::Basic, None);
+        buffer.set_rich_text(spans, &attrs, shaping_for(text), None);
         buffer.shape_until_scroll(font_system, false);
         buffer
     }
@@ -435,6 +434,21 @@ impl TextRendererFactory {
     }
 
     pub fn end_frame(&mut self) {
+        self.trim();
+    }
+
+    /// Drop glyphs not used this frame from the atlas
+    pub fn trim(&self) {
         self.shared.borrow_mut().atlas.trim();
+    }
+}
+
+/// Basic shaping is faster but uses no fallback fonts: Chinese or Japanese titles need the
+/// advanced one
+fn shaping_for(text: &str) -> glyphon::Shaping {
+    if text.is_ascii() {
+        glyphon::Shaping::Basic
+    } else {
+        glyphon::Shaping::Advanced
     }
 }

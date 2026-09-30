@@ -2,6 +2,8 @@ struct ViewUniform {
     transform: mat4x4<f32>,
     size: vec2<f32>,
     scale: f32,
+    // Top left of the view in target pixels, @builtin(position) is relative to the target
+    origin: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -79,12 +81,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var border_radius = select_border_radius(
         quad_border_radius,
-        in.position.xy,
+        (in.position.xy - view_uniform.origin),
         (quad_pos + (quad_size * 0.5)).xy
     );
 
     var dist: f32 = distance_alg(
-        in.position.xy,
+        (in.position.xy - view_uniform.origin),
         quad_pos,
         quad_size,
         border_radius,

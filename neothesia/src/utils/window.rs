@@ -9,6 +9,7 @@ use winit::{
     event::WindowEvent,
 };
 
+#[derive(Clone)]
 pub struct WindowState {
     pub physical_size: PhysicalSize<u32>,
     pub logical_size: LogicalSize<f32>,

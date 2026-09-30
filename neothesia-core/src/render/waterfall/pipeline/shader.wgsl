@@ -2,6 +2,8 @@ struct ViewUniform {
     transform: mat4x4<f32>,
     size: vec2<f32>,
     scale: f32,
+    // Top left of the view in target pixels, @builtin(position) is relative to the target
+    origin: vec2<f32>,
 }
 
 struct TimeUniform {
@@ -95,7 +97,7 @@ fn rounded_box_sdf(frag_coord: vec2<f32>, position: vec2<f32>, size: vec2<f32>, 
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let d = rounded_box_sdf(in.position.xy, in.note_pos, in.size, in.radius);
+    let d = rounded_box_sdf((in.position.xy - view_uniform.origin), in.note_pos, in.size, in.radius);
     let scale = view_uniform.scale;
 
     // Outer glow
@@ -107,7 +109,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let fill_alpha = 1.0 - smoothstep(-0.5, 0.5, d);
 
     // 0 at the top of the note, 1 at the bottom
-    let t = clamp((in.position.y - in.note_pos.y) / max(in.size.y, 1.0), 0.0, 1.0);
+    let t = clamp(((in.position.y - view_uniform.origin.y) - in.note_pos.y) / max(in.size.y, 1.0), 0.0, 1.0);
     var color = in.color * mix(0.72, 1.12, t);
 
     // Bright rim just inside the edge

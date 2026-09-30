@@ -21,6 +21,11 @@ pub struct UiState {
     pub range_detection: RangeDetection,
 
     page_stack: VecDeque<Page>,
+
+    /// Opened from the workspace on one page: going back from it closes the menu
+    embedded: bool,
+    /// Set when an embedded menu was closed
+    pub closed: bool,
 }
 
 impl UiState {
@@ -38,7 +43,18 @@ impl UiState {
 
             page_stack,
             range_detection: RangeDetection::default(),
+            embedded: false,
+            closed: false,
         }
+    }
+
+    /// A menu showing only `page`, closed by going back
+    pub fn embedded(ctx: &Context, song: Option<Song>, page: Page) -> Self {
+        let mut state = Self::new(ctx, song);
+        state.page_stack.clear();
+        state.page_stack.push_front(page);
+        state.embedded = true;
+        state
     }
 
     pub fn song(&self) -> Option<&Song> {
@@ -60,6 +76,9 @@ impl UiState {
     pub fn go_back(&mut self) {
         self.range_detection.stop_detection();
         match self.page_stack.len() {
+            1 if self.embedded => {
+                self.closed = true;
+            }
             1 => {
                 // Last page in the stack, let's go to exit page
                 self.page_stack.push_front(Page::Exit);

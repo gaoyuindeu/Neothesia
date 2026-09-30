@@ -1,13 +1,18 @@
 pub mod freeplay;
 pub mod menu_scene;
 pub mod playing_scene;
+pub mod workspace;
 
 use crate::{
     NeothesiaEvent, context::Context, scene::playing_scene::Keyboard, utils::window::WinitEvent,
 };
 use midi_file::midly::MidiMessage;
-use neothesia_core::render::{Image, ImageIdentifier, ImageRenderer, QuadRenderer, TextRenderer};
-use std::{collections::HashMap, time::Duration};
+use neothesia_core::render::{
+    Image, ImageIdentifier, ImageRenderer, QuadRenderer, QuadRendererFactory, TextRenderer,
+    TextRendererFactory,
+};
+use std::{collections::HashMap, rc::Rc, time::Duration};
+use wgpu_jumpstart::{TransformUniform, Uniform};
 use winit::{
     dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, KeyEvent, WindowEvent},
@@ -201,10 +206,47 @@ struct NuonLayer {
     images: Vec<Image>,
 }
 
+/// Drawing state for a part of the UI that lives in whole-window coordinates, next to
+/// the main view (which uses [`Context::transform`] and the context's factories)
+pub struct WindowGfx {
+    pub transform: std::cell::RefCell<Uniform<TransformUniform>>,
+    pub quad_factory: QuadRendererFactory,
+    pub text_factory: TextRendererFactory,
+}
+
+impl WindowGfx {
+    pub fn new(ctx: &Context) -> Self {
+        let transform = Uniform::new(
+            &ctx.gpu.device,
+            TransformUniform::default(),
+            wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+        );
+        Self {
+            quad_factory: QuadRendererFactory::new(&ctx.gpu, &transform),
+            text_factory: TextRendererFactory::new(&ctx.gpu),
+            transform: std::cell::RefCell::new(transform),
+        }
+    }
+
+    /// Follow the window size; call every frame before rendering
+    pub fn update(&self, ctx: &Context) {
+        let ws = &ctx.full_window_state;
+        let mut transform = self.transform.borrow_mut();
+        transform.data.update(
+            ws.physical_size.width as f32,
+            ws.physical_size.height as f32,
+            ws.scale_factor as f32,
+        );
+        transform.update(&ctx.gpu.queue);
+    }
+}
+
 pub struct NuonRenderer {
     layers: Vec<NuonLayer>,
     image_map: HashMap<ImageIdentifier, Image>,
     image_renderer: ImageRenderer,
+    /// Draw in whole-window coordinates instead of the main view
+    gfx: Option<Rc<WindowGfx>>,
 }
 
 impl NuonRenderer {
@@ -217,13 +259,33 @@ impl NuonRenderer {
                 ctx.gpu.texture_format,
                 &ctx.transform,
             ),
+            gfx: None,
+        }
+    }
+
+    /// A renderer for UI in whole-window coordinates
+    pub fn for_window(ctx: &Context, gfx: Rc<WindowGfx>) -> Self {
+        let image_renderer = ImageRenderer::new(
+            &ctx.gpu.device,
+            ctx.gpu.texture_format,
+            &gfx.transform.borrow(),
+        );
+        Self {
+            layers: Vec::new(),
+            image_map: HashMap::new(),
+            image_renderer,
+            gfx: Some(gfx),
         }
     }
 
     fn ensure_layers(&mut self, ctx: &mut Context, len: usize) {
+        let (quads, text) = match &self.gfx {
+            Some(gfx) => (&gfx.quad_factory, &gfx.text_factory),
+            None => (&ctx.quad_renderer_factory, &ctx.text_renderer_factory),
+        };
         self.layers.resize_with(len, || NuonLayer {
-            quad_renderer: ctx.quad_renderer_factory.new_renderer(),
-            text_renderer: ctx.text_renderer_factory.new_renderer(),
+            quad_renderer: quads.new_renderer(),
+            text_renderer: text.new_renderer(),
             images: Vec::new(),
         });
     }
@@ -260,6 +322,11 @@ fn handle_nuon_window_event(nuon: &mut nuon::Ui, event: &WindowEvent, ctx: &Cont
 
 fn render_nuon(ui: &mut nuon::Ui, nuon_renderer: &mut NuonRenderer, ctx: &mut Context) {
     nuon_renderer.ensure_layers(ctx, ui.layers.len());
+    let window_state = if nuon_renderer.gfx.is_some() {
+        &ctx.full_window_state
+    } else {
+        &ctx.window_state
+    };
 
     for (layer, out) in ui.layers.iter().zip(nuon_renderer.layers.iter_mut()) {
         out.quad_renderer.clear();
@@ -267,9 +334,9 @@ fn render_nuon(ui: &mut nuon::Ui, nuon_renderer: &mut NuonRenderer, ctx: &mut Co
 
         let scissor_rect = layer.scissor_rect;
         let pos = LogicalPosition::new(scissor_rect.origin.x, scissor_rect.origin.y)
-            .to_physical::<u32>(ctx.window_state.scale_factor);
+            .to_physical::<u32>(window_state.scale_factor);
         let size = LogicalSize::new(scissor_rect.width(), scissor_rect.height())
-            .to_physical::<u32>(ctx.window_state.scale_factor);
+            .to_physical::<u32>(window_state.scale_factor);
         let scissor_rect =
             neothesia_core::Rect::new((pos.x, pos.y).into(), (size.width, size.height).into());
 
@@ -358,10 +425,8 @@ fn render_nuon(ui: &mut nuon::Ui, nuon_renderer: &mut NuonRenderer, ctx: &mut Co
         }
 
         out.quad_renderer.prepare();
-        out.text_renderer.update(
-            ctx.window_state.physical_size,
-            ctx.window_state.scale_factor as f32,
-        );
+        out.text_renderer
+            .update(window_state.physical_size, window_state.scale_factor as f32);
     }
 
     ui.done();

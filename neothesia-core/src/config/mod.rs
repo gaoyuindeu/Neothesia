@@ -172,6 +172,30 @@ impl Config {
         self.history.last_opened_song = last_opened_song;
     }
 
+    pub fn library_folders(&self) -> &[PathBuf] {
+        &self.history.library_folders
+    }
+
+    pub fn set_library_folders(&mut self, folders: Vec<PathBuf>) {
+        self.history.library_folders = folders;
+    }
+
+    pub fn sidebar_visible(&self) -> bool {
+        self.history.sidebar_visible
+    }
+
+    pub fn set_sidebar_visible(&mut self, visible: bool) {
+        self.history.sidebar_visible = visible;
+    }
+
+    pub fn sidebar_width(&self) -> f32 {
+        self.history.sidebar_width
+    }
+
+    pub fn set_sidebar_width(&mut self, width: f32) {
+        self.history.sidebar_width = width;
+    }
+
     pub fn soundfont_path(&self) -> Option<PathBuf> {
         self.synth
             .soundfont_path

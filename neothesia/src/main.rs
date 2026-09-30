@@ -11,8 +11,7 @@ mod utils;
 use std::{sync::Arc, time::Duration};
 
 use context::Context;
-use scene::{Scene, menu_scene, playing_scene};
-use song::Song;
+use scene::workspace::Workspace;
 use utils::window::WindowState;
 
 use midi_file::midly::MidiMessage;
@@ -32,8 +31,10 @@ pub enum NeothesiaEvent {
     /// Go to playing scene
     Play(song::Song),
     FreePlay(Option<song::Song>),
-    /// Go to main menu scene
+    /// Leave the current scene (back / Esc / song finished)
     MainMenu(Option<song::Song>),
+    /// A menu page opened in the workspace was closed, with the song as edited there
+    CloseMenu(Option<song::Song>),
     MidiInput {
         /// The MIDI channel that this message is associated with.
         channel: u8,
@@ -45,25 +46,48 @@ pub enum NeothesiaEvent {
 
 struct Neothesia {
     context: Context,
-    game_scene: Box<dyn Scene>,
+    workspace: Workspace,
     // We are dropping surface last, because of some wgpu internal ref-counting errors that cause libwayland crasch
     surface: Surface,
     is_occluded: bool,
+    frame_dump: Option<FrameDump>,
+}
+
+/// Debugging aid: `NEOTHESIA_FRAME_DUMP=<dir>` saves the frames listed in
+/// `NEOTHESIA_FRAME_DUMP_AT` (comma separated frame numbers, default 90) as PNG files and
+/// quits after the last one
+struct FrameDump {
+    dir: std::path::PathBuf,
+    at: Vec<u64>,
+    frame: u64,
+}
+
+impl FrameDump {
+    fn from_env() -> Option<Self> {
+        let dir = std::path::PathBuf::from(std::env::var_os("NEOTHESIA_FRAME_DUMP")?);
+        let mut at: Vec<u64> = std::env::var("NEOTHESIA_FRAME_DUMP_AT")
+            .unwrap_or_else(|_| "90".into())
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        at.sort_unstable();
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(Self { dir, at, frame: 0 })
+    }
 }
 
 impl Neothesia {
     fn new(mut context: Context, surface: Surface) -> Self {
-        let song = Song::from_env(&context);
-        let game_scene = menu_scene::MenuScene::new(&mut context, song);
-
         context.resize();
+        let workspace = Workspace::new(&mut context);
         context.gpu.submit();
 
         Self {
             context,
             surface,
-            game_scene: Box::new(game_scene),
+            workspace,
             is_occluded: false,
+            frame_dump: FrameDump::from_env(),
         }
     }
 
@@ -73,14 +97,14 @@ impl Neothesia {
         _window_id: winit::window::WindowId,
         event: &WindowEvent,
     ) {
-        self.context.window_state.window_event(event);
+        self.context.window_event(event);
 
         match event {
             // Windows sets size to 0 on minimise
             WindowEvent::Resized(ps) if ps.width > 0 && ps.height > 0 => {
                 self.surface.resize_swap_chain(
-                    self.context.window_state.physical_size.width,
-                    self.context.window_state.physical_size.height,
+                    self.context.full_window_state.physical_size.width,
+                    self.context.full_window_state.physical_size.height,
                 );
 
                 self.context.resize();
@@ -134,7 +158,7 @@ impl Neothesia {
         }
 
         if !event.redraw_requested() {
-            self.game_scene.window_event(&mut self.context, event);
+            self.workspace.window_event(&mut self.context, event);
         }
     }
 
@@ -145,19 +169,19 @@ impl Neothesia {
     ) {
         match event {
             NeothesiaEvent::Play(song) => {
-                let to = playing_scene::PlayingScene::new(&mut self.context, song);
-                self.game_scene = Box::new(to);
+                self.workspace.play(&mut self.context, song);
             }
             NeothesiaEvent::FreePlay(song) => {
-                let to = scene::freeplay::FreeplayScene::new(&mut self.context, song);
-                self.game_scene = Box::new(to);
+                self.workspace.freeplay(&mut self.context, song);
             }
             NeothesiaEvent::MainMenu(song) => {
-                let to = menu_scene::MenuScene::new(&mut self.context, song);
-                self.game_scene = Box::new(to);
+                self.workspace.back(&mut self.context, song);
+            }
+            NeothesiaEvent::CloseMenu(song) => {
+                self.workspace.menu_closed(&mut self.context, song);
             }
             NeothesiaEvent::MidiInput { channel, message } => {
-                self.game_scene
+                self.workspace
                     .midi_event(&mut self.context, channel, &message);
             }
             NeothesiaEvent::Exit => {
@@ -175,7 +199,7 @@ impl Neothesia {
         #[cfg(debug_assertions)]
         self.context.fps_ticker.tick();
 
-        self.game_scene.update(&mut self.context, delta);
+        self.workspace.update(&mut self.context, delta);
     }
 
     #[profiling::function]
@@ -210,6 +234,22 @@ impl Neothesia {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        self.encode_frame(view, frame.texture.size());
+        let dump = self.encode_frame_dump(frame.texture.size());
+
+        self.context.gpu.submit();
+
+        if let Some(dump) = dump {
+            self.save_frame_dump(dump);
+        }
+
+        self.context.window.pre_present_notify();
+        self.context.gpu.queue.present(frame);
+        self.context.text_renderer_factory.end_frame();
+        self.workspace.end_frame();
+    }
+
+    fn encode_frame(&mut self, view: &wgpu::TextureView, size: wgpu::Extent3d) {
         {
             let bg_color = self.context.config.background_color();
             let bg_color = wgpu_jumpstart::Color::from(bg_color).into_linear_wgpu_color();
@@ -235,16 +275,109 @@ impl Neothesia {
                     multiview_mask: None,
                 });
 
-            let mut rpass = wgpu_jumpstart::RenderPass::new(rpass, frame.texture.size());
+            let mut rpass = wgpu_jumpstart::RenderPass::new(rpass, size);
 
-            self.game_scene.render(&mut rpass);
+            self.workspace.render(&mut rpass);
+        }
+    }
+
+    /// Render the frame once more into a texture that can be read back
+    fn encode_frame_dump(&mut self, size: wgpu::Extent3d) -> Option<(wgpu::Buffer, u32, u32)> {
+        let dump = self.frame_dump.as_mut()?;
+        dump.frame += 1;
+        if !dump.at.contains(&dump.frame) {
+            return None;
         }
 
-        self.context.gpu.submit();
+        let texture = self
+            .context
+            .gpu
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("frame dump"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.context.gpu.texture_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.encode_frame(&view, size);
 
-        self.context.window.pre_present_notify();
-        self.context.gpu.queue.present(frame);
-        self.context.text_renderer_factory.end_frame();
+        let row = (size.width * 4).div_ceil(256) * 256;
+        let buffer = self
+            .context
+            .gpu
+            .device
+            .create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: (row * size.height) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+        self.context.gpu.encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: Default::default(),
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(size.height),
+                },
+            },
+            size,
+        );
+        Some((buffer, size.width, size.height))
+    }
+
+    fn save_frame_dump(&mut self, (buffer, width, height): (wgpu::Buffer, u32, u32)) {
+        let Some(dump) = self.frame_dump.as_ref() else {
+            return;
+        };
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.context
+            .gpu
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
+        let Ok(data) = slice.get_mapped_range() else {
+            return;
+        };
+        let row = (width * 4).div_ceil(256) * 256;
+        let bgra = matches!(
+            self.context.gpu.texture_format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            let line = &data[(y * row) as usize..(y * row + width * 4) as usize];
+            for px in line.as_chunks::<4>().0 {
+                if bgra {
+                    rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                } else {
+                    rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                }
+            }
+        }
+        let path = dump.dir.join(format!("frame_{:05}.png", dump.frame));
+        match neothesia_image::save_png(&path, &rgba, width, height) {
+            Ok(()) => log::info!("Saved {}", path.display()),
+            Err(err) => log::error!("{}: {err}", path.display()),
+        }
+        if dump.at.last() == Some(&dump.frame) {
+            self.context.proxy.send_event(NeothesiaEvent::Exit).ok();
+        }
     }
 }
 

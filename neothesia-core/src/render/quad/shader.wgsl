@@ -2,6 +2,8 @@ struct ViewUniform {
     transform: mat4x4<f32>,
     size: vec2<f32>,
     scale: f32,
+    // Top left of the view in target pixels, @builtin(position) is relative to the target
+    origin: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -99,11 +101,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     let border_radius = select_border_radius(
         in.quad_border_radius,
-        in.position.xy,
+        (in.position.xy - view_uniform.origin),
         center
     );
 
-    let local_center = in.position.xy - center;
+    let local_center = (in.position.xy - view_uniform.origin) - center;
     let dist = rounded_box_sdf(local_center, in.quad_size, border_radius);
     let alpha = 1.0 - smoothstep(-0.5, 0.5, dist);
 

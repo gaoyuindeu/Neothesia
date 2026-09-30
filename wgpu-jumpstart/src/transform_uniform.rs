@@ -6,8 +6,11 @@ pub struct TransformUniform {
     transform: [f32; 16],
     size: [f32; 2],
     scale: f32,
-    // must be aligned to largest member (vec4),
     _padding: [f32; 1],
+    /// Top left of the view in target pixels (shaders that use the fragment position)
+    origin: [f32; 2],
+    // must be aligned to largest member (vec4),
+    _padding2: [f32; 2],
 }
 impl Default for TransformUniform {
     fn default() -> Self {
@@ -16,6 +19,8 @@ impl Default for TransformUniform {
             size: [1080.0, 720.0],
             scale: 1.0,
             _padding: [0.0; 1],
+            origin: [0.0; 2],
+            _padding2: [0.0; 2],
         }
     }
 }
@@ -24,6 +29,11 @@ impl TransformUniform {
         self.transform = orthographic_projection(width, height);
         self.size = [width, height];
         self.scale = scale;
+    }
+
+    /// Where the view starts in the render target, in physical pixels
+    pub fn set_origin(&mut self, x: f32, y: f32) {
+        self.origin = [x, y];
     }
 }
 

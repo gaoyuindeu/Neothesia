@@ -65,6 +65,11 @@ pub struct PlayingScene {
 }
 
 impl PlayingScene {
+    /// Stop at the current position (used when a song is opened without starting it)
+    pub fn pause(&mut self) {
+        self.player.pause();
+    }
+
     pub fn new(ctx: &mut Context, song: Song) -> Self {
         let keyboard = Keyboard::new(ctx, song.config.clone());
 
@@ -360,6 +365,10 @@ impl Scene for PlayingScene {
         );
 
         if self.player.is_finished() && !self.player.is_paused() {
+            // Back to the start, paused, ready for another go
+            self.player.pause();
+            self.player.set_percentage_time(0.0);
+            self.keyboard.reset_notes();
             ctx.proxy
                 .send_event(NeothesiaEvent::MainMenu(Some(self.player.song().clone())))
                 .ok();

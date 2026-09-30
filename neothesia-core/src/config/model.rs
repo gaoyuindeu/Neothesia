@@ -72,6 +72,21 @@ impl Default for PlaybackConfig {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct HistoryV1 {
     pub last_opened_song: Option<PathBuf>,
+    /// Folders shown in the library side bar
+    #[serde(default)]
+    pub library_folders: Vec<PathBuf>,
+    #[serde(default = "default_sidebar_visible")]
+    pub sidebar_visible: bool,
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+}
+
+fn default_sidebar_visible() -> bool {
+    true
+}
+
+fn default_sidebar_width() -> f32 {
+    280.0
 }
 
 #[derive(Serialize, Deserialize)]
@@ -83,6 +98,9 @@ impl Default for History {
     fn default() -> Self {
         Self::V1(HistoryV1 {
             last_opened_song: None,
+            library_folders: Vec::new(),
+            sidebar_visible: default_sidebar_visible(),
+            sidebar_width: default_sidebar_width(),
         })
     }
 }

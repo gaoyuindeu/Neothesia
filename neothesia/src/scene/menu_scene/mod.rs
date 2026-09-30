@@ -1,6 +1,6 @@
 mod state;
 use bytes::Bytes;
-use state::{Page, UiState};
+pub use state::{Page, UiState, connect_io};
 
 mod midi_picker;
 use midi_picker::open_midi_file_picker;
@@ -98,9 +98,13 @@ pub struct MenuScene {
 }
 
 impl MenuScene {
-    pub fn new(ctx: &mut Context, song: Option<Song>) -> Self {
-        let iced_state = UiState::new(ctx, song);
+    /// Only one page, going back from it sends [`NeothesiaEvent::CloseMenu`]
+    pub fn embedded(ctx: &mut Context, song: Option<Song>, page: Page) -> Self {
+        let state = UiState::embedded(ctx, song, page);
+        Self::with_state(ctx, state)
+    }
 
+    fn with_state(ctx: &mut Context, iced_state: UiState) -> Self {
         let quad_pipeline = ctx.quad_renderer_factory.new_renderer();
         let text_renderer = ctx.text_renderer_factory.new_renderer();
 
@@ -318,6 +322,12 @@ impl Scene for MenuScene {
         self.state.tick(ctx);
 
         self.main_ui(ctx);
+
+        if std::mem::take(&mut self.state.closed) {
+            ctx.proxy
+                .send_event(NeothesiaEvent::CloseMenu(self.state.song.clone()))
+                .ok();
+        }
 
         super::render_nuon(&mut self.nuon, &mut self.nuon_renderer, ctx);
 
