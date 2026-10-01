@@ -361,7 +361,7 @@ fn main() {
                 .map(|n| n.map(|n| child_text(n, "voice")).unwrap_or_default())
                 .collect();
             lines.push_str(&format!(
-                "{{\"page\": {}, \"stack\": {}, \"size\": {}, \"matched\": {}, \"known\": {}, \"features\": {:?}, \"boxes\": {:?}, \"heads\": {:?}, \"digits\": {:?}, \"truths\": {:?}, \"stems\": {stems:?}, \"voices\": {voices:?}}}\n",
+                "{{\"page\": {}, \"stack\": {}, \"size\": {}, \"matched\": {}, \"known\": {}, \"features\": {:?}, \"boxes\": {:?}, \"heads\": {:?}, \"digits\": {:?}, \"truths\": {:?}, \"stems\": {stems:?}, \"voices\": {voices:?}, \"p\": {}}}\n",
                 pair.page,
                 pair.stack,
                 pair.digits.len(),
@@ -371,7 +371,8 @@ fn main() {
                 pair.boxes,
                 pair.heads,
                 pair.digits,
-                truths
+                truths,
+                pair.p
             ));
         }
         std::fs::write(path, lines).unwrap();

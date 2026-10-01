@@ -110,6 +110,7 @@ pub struct PairOut {
     /// Their heads' boxes
     pub heads: Vec<[f32; 4]>,
     pub features: Vec<f32>,
+    pub p: f32,
 }
 
 /// Fingers (note, finger), report and details of a reading
@@ -396,6 +397,7 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
                     .map(|&h| note_of_head[h].map(|n| notes[n].node))
                     .collect(),
                 features: pair.features.to_vec(),
+                p: pair.p,
             });
         }
         for (i, (d, r)) in p.digits.iter().enumerate() {
@@ -805,6 +807,8 @@ pub struct Pair {
     /// Heads of the chord, top to bottom
     pub chord: Vec<usize>,
     pub features: [f32; assoc::FEATURES],
+    /// Probability given by the association model (-1 without one)
+    pub p: f32,
 }
 
 fn attach(
@@ -917,88 +921,203 @@ fn attach(
         out.sort_by(|a, b| a.0.total_cmp(&b.0));
         out
     };
-    let cands: Vec<Vec<Candidate>> = stacks.iter().map(|st| candidates(st)).collect();
+    // Rounds: a stack of several digits left alone may be two stacks one over the other (the
+    // fingering under a chord and over the chord below it): split at its widest space, and
+    // the page assigned again
+    const FORBIDDEN: f64 = 1e6;
+    let mut stacks = stacks;
+    let mut round = 0;
+    let (stacks, cands, feats, choice, cost, slots, real, cols) = loop {
+        round += 1;
+        let cands: Vec<Vec<Candidate>> = stacks.iter().map(|st| candidates(st)).collect();
 
-    // Features of each (stack, candidate chord) pair
-    let stack_cx =
-        |st: &[usize]| st.iter().map(|&d| digits[d].1.cx()).sum::<f32>() / st.len() as f32;
-    let stack_cy =
-        |st: &[usize]| st.iter().map(|&d| digits[d].1.cy()).sum::<f32>() / st.len() as f32;
-    let row_of: Vec<Vec<usize>> = (0..stacks.len())
-        .map(|i| {
-            (0..stacks.len())
-                .filter(|&j| {
-                    j != i
-                        && (stack_cy(&stacks[i]) - stack_cy(&stacks[j])).abs() < 0.6 * il
-                        && (stack_cx(&stacks[i]) - stack_cx(&stacks[j])).abs() < 8.0 * il
+        // Features of each (stack, candidate chord) pair
+        let stack_cx =
+            |st: &[usize]| st.iter().map(|&d| digits[d].1.cx()).sum::<f32>() / st.len() as f32;
+        let stack_cy =
+            |st: &[usize]| st.iter().map(|&d| digits[d].1.cy()).sum::<f32>() / st.len() as f32;
+        let row_of: Vec<Vec<usize>> = (0..stacks.len())
+            .map(|i| {
+                (0..stacks.len())
+                    .filter(|&j| {
+                        j != i
+                            && (stack_cy(&stacks[i]) - stack_cy(&stacks[j])).abs() < 0.6 * il
+                            && (stack_cx(&stacks[i]) - stack_cx(&stacks[j])).abs() < 8.0 * il
+                    })
+                    .collect()
+            })
+            .collect();
+        let features = |i: usize, k: usize| -> [f32; assoc::FEATURES] {
+            let st = &stacks[i];
+            let (score, c, above, key) = cands[i][k];
+            let ch = &chords[c];
+            let hx0 = ch
+                .iter()
+                .map(|&h| heads[h].rect.x0)
+                .fold(f32::MAX, f32::min);
+            let hx1 = ch
+                .iter()
+                .map(|&h| heads[h].rect.x1)
+                .fold(f32::MIN, f32::max);
+            let (top, bottom) = (heads[ch[0]].rect.y0, heads[ch[ch.len() - 1]].rect.y1);
+            let (scx, scy) = (stack_cx(st), stack_cy(st));
+            let dist = if above {
+                top - digits[st[st.len() - 1]].1.y1
+            } else {
+                digits[st[0]].1.y0 - bottom
+            };
+            let height = st
+                .iter()
+                .map(|&d| digits[d].1.y1 - digits[d].1.y0)
+                .sum::<f32>()
+                / st.len() as f32;
+            // Bottom line of the chord's staff, from a head and its staff position
+            let h0 = &heads[ch[0]];
+            let staff_bottom = h0.rect.cy() + h0.position * il / 2.0;
+            let lower_staff = per_system >= 2 && h0.staff == per_system - 1;
+            let other_staff = cands[i].iter().filter(|o| o.3 != key).count();
+            let row = &row_of[i];
+            let agree = if row.is_empty() {
+                0.5
+            } else {
+                row.iter()
+                    .filter(|&&j| cands[j].first().is_some_and(|b| b.3 == key))
+                    .count() as f32
+                    / row.len() as f32
+            };
+            [
+                (scx - (hx0 + hx1) / 2.0) / il,
+                (scx - (hx0 + hx1) / 2.0).abs() / il,
+                dist.max(0.0) / il,
+                above as u8 as f32,
+                st.len() as f32,
+                ch.len() as f32,
+                st.len() as f32 - ch.len() as f32,
+                k as f32,
+                cands[i].len() as f32,
+                score - cands[i][0].0,
+                height / il,
+                lower_staff as u8 as f32,
+                ((staff_bottom - scy) / (il / 2.0)).clamp(-40.0, 40.0) / 10.0,
+                h0.position / 10.0,
+                heads[ch[ch.len() - 1]].position / 10.0,
+                other_staff as f32,
+                (hx1 - hx0) / il,
+                score,
+                row.len() as f32 / 5.0,
+                agree,
+            ]
+        };
+        let feats: Vec<Vec<[f32; assoc::FEATURES]>> = (0..stacks.len())
+            .map(|i| (0..cands[i].len()).map(|k| features(i, k)).collect())
+            .collect();
+        let model = assoc::model();
+
+        // Each stack to a side (above / below) of a chord, all stacks of the page at once with the
+        // least total cost: a row of digits between two staves goes to the staff whose notes no
+        // other row can take. A stack can stay without a chord (cost UNASSIGNED).
+        // With the model: cost -ln p, a stack stays alone below probability P0
+        let p0: f64 = std::env::var("SCORE_READER_P0")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0.1);
+        let unassigned: f64 = if model.is_some() { -p0.ln() } else { 8.0 };
+
+        // Columns: a single note takes one digit (from above or below), a chord one stack from
+        // above and one from below
+        let n = stacks.len();
+        let mut slot_of = Vec::with_capacity(chords.len());
+        let mut slots: Vec<(usize, Option<bool>)> = Vec::new();
+        let one_slot = std::env::var_os("SCORE_READER_ONE_SLOT").is_some();
+        let two_sided = |c: usize| chords[c].len() > 1 && !one_slot;
+        for c in 0..chords.len() {
+            slot_of.push(slots.len());
+            if !two_sided(c) {
+                slots.push((c, None));
+            } else {
+                slots.push((c, Some(true)));
+                slots.push((c, Some(false)));
+            }
+        }
+        let real = slots.len();
+        let cols = real + n;
+        let mut cost = vec![FORBIDDEN; n * cols];
+        for (i, cand) in cands.iter().enumerate() {
+            for (k, &(score, chord, above, _)) in cand.iter().enumerate() {
+                let slot = slot_of[chord] + usize::from(two_sided(chord) && !above);
+                // More digits than notes: a worse fit
+                let excess = stacks[i].len().saturating_sub(chords[chord].len()) as f64;
+                cost[i * cols + slot] = match model {
+                    Some(m) => -(m.prob(&feats[i][k]) as f64).max(1e-4).ln(),
+                    None => score as f64 + excess,
+                };
+            }
+            cost[i * cols + real + i] = unassigned;
+        }
+        // A chord with stacks from above and below that hold more digits than it has notes: the
+        // worse of the two is not allowed there, and the page assigned again
+        let mut choice = Vec::new();
+        for _ in 0..8 {
+            if n == 0 {
+                break;
+            }
+            choice = assign::assign(&cost, n, cols);
+            let mut on_chord: HashMap<usize, Vec<usize>> = HashMap::new();
+            for (i, &slot) in choice.iter().enumerate() {
+                if slot < real && cost[i * cols + slot] < FORBIDDEN {
+                    on_chord.entry(slots[slot].0).or_default().push(i);
+                }
+            }
+            let mut changed = false;
+            for (c, st) in on_chord {
+                let digits_on: usize = st.iter().map(|&i| stacks[i].len()).sum();
+                if st.len() < 2 || digits_on <= chords[c].len() {
+                    continue;
+                }
+                let worst = *st
+                    .iter()
+                    .max_by(|&&a, &&b| {
+                        cost[a * cols + choice[a]].total_cmp(&cost[b * cols + choice[b]])
+                    })
+                    .unwrap();
+                cost[worst * cols + choice[worst]] = FORBIDDEN;
+                changed = true;
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let alone: Vec<usize> = (0..n)
+            .filter(|&i| {
+                stacks[i].len() >= 2
+                    && (choice[i] >= real || cost[i * cols + choice[i]] >= FORBIDDEN)
+            })
+            .collect();
+        if round >= 3 || alone.is_empty() {
+            break (stacks, cands, feats, choice, cost, slots, real, cols);
+        }
+        let mut next: Vec<Vec<usize>> = Vec::new();
+        for (i, st) in stacks.into_iter().enumerate() {
+            if !alone.contains(&i) {
+                next.push(st);
+                continue;
+            }
+            let widest = (0..st.len() - 1)
+                .max_by(|&a, &b| {
+                    let space = |k: usize| digits[st[k + 1]].1.y0 - digits[st[k]].1.y1;
+                    space(a).total_cmp(&space(b))
                 })
-                .collect()
-        })
-        .collect();
-    let features = |i: usize, k: usize| -> [f32; assoc::FEATURES] {
-        let st = &stacks[i];
-        let (score, c, above, key) = cands[i][k];
-        let ch = &chords[c];
-        let hx0 = ch
-            .iter()
-            .map(|&h| heads[h].rect.x0)
-            .fold(f32::MAX, f32::min);
-        let hx1 = ch
-            .iter()
-            .map(|&h| heads[h].rect.x1)
-            .fold(f32::MIN, f32::max);
-        let (top, bottom) = (heads[ch[0]].rect.y0, heads[ch[ch.len() - 1]].rect.y1);
-        let (scx, scy) = (stack_cx(st), stack_cy(st));
-        let dist = if above {
-            top - digits[st[st.len() - 1]].1.y1
-        } else {
-            digits[st[0]].1.y0 - bottom
-        };
-        let height = st
-            .iter()
-            .map(|&d| digits[d].1.y1 - digits[d].1.y0)
-            .sum::<f32>()
-            / st.len() as f32;
-        // Bottom line of the chord's staff, from a head and its staff position
-        let h0 = &heads[ch[0]];
-        let staff_bottom = h0.rect.cy() + h0.position * il / 2.0;
-        let lower_staff = per_system >= 2 && h0.staff == per_system - 1;
-        let other_staff = cands[i].iter().filter(|o| o.3 != key).count();
-        let row = &row_of[i];
-        let agree = if row.is_empty() {
-            0.5
-        } else {
-            row.iter()
-                .filter(|&&j| cands[j].first().is_some_and(|b| b.3 == key))
-                .count() as f32
-                / row.len() as f32
-        };
-        [
-            (scx - (hx0 + hx1) / 2.0) / il,
-            (scx - (hx0 + hx1) / 2.0).abs() / il,
-            dist.max(0.0) / il,
-            above as u8 as f32,
-            st.len() as f32,
-            ch.len() as f32,
-            st.len() as f32 - ch.len() as f32,
-            k as f32,
-            cands[i].len() as f32,
-            score - cands[i][0].0,
-            height / il,
-            lower_staff as u8 as f32,
-            ((staff_bottom - scy) / (il / 2.0)).clamp(-40.0, 40.0) / 10.0,
-            h0.position / 10.0,
-            heads[ch[ch.len() - 1]].position / 10.0,
-            other_staff as f32,
-            (hx1 - hx0) / il,
-            score,
-            row.len() as f32 / 5.0,
-            agree,
-        ]
+                .unwrap();
+            let (a, b) = st.split_at(widest + 1);
+            next.push(a.to_vec());
+            next.push(b.to_vec());
+        }
+        next.sort_by(|a, b| digits[a[0]].1.y0.total_cmp(&digits[b[0]].1.y0));
+        stacks = next;
     };
-    let feats: Vec<Vec<[f32; assoc::FEATURES]>> = (0..stacks.len())
-        .map(|i| (0..cands[i].len()).map(|k| features(i, k)).collect())
-        .collect();
+
+    let model = assoc::model();
     if let Some(out) = pairs_out {
         for (i, st) in stacks.iter().enumerate() {
             for (k, cand) in cands[i].iter().enumerate() {
@@ -1007,84 +1126,9 @@ fn attach(
                     stack: st.clone(),
                     chord: chords[cand.1].clone(),
                     features: feats[i][k],
+                    p: model.map_or(-1.0, |m| m.prob(&feats[i][k])),
                 });
             }
-        }
-    }
-    let model = assoc::model();
-
-    // Each stack to a side (above / below) of a chord, all stacks of the page at once with the
-    // least total cost: a row of digits between two staves goes to the staff whose notes no
-    // other row can take. A stack can stay without a chord (cost UNASSIGNED).
-    // With the model: cost -ln p, a stack stays alone below probability P0
-    let p0: f64 = std::env::var("SCORE_READER_P0")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0.1);
-    let unassigned: f64 = if model.is_some() { -p0.ln() } else { 8.0 };
-    const FORBIDDEN: f64 = 1e6;
-    // Columns: a single note takes one digit (from above or below), a chord one stack from
-    // above and one from below
-    let n = stacks.len();
-    let mut slot_of = Vec::with_capacity(chords.len());
-    let mut slots: Vec<(usize, Option<bool>)> = Vec::new();
-    let one_slot = std::env::var_os("SCORE_READER_ONE_SLOT").is_some();
-    let two_sided = |c: usize| chords[c].len() > 1 && !one_slot;
-    for c in 0..chords.len() {
-        slot_of.push(slots.len());
-        if !two_sided(c) {
-            slots.push((c, None));
-        } else {
-            slots.push((c, Some(true)));
-            slots.push((c, Some(false)));
-        }
-    }
-    let real = slots.len();
-    let cols = real + n;
-    let mut cost = vec![FORBIDDEN; n * cols];
-    for (i, cand) in cands.iter().enumerate() {
-        for (k, &(score, chord, above, _)) in cand.iter().enumerate() {
-            let slot = slot_of[chord] + usize::from(two_sided(chord) && !above);
-            // More digits than notes: a worse fit
-            let excess = stacks[i].len().saturating_sub(chords[chord].len()) as f64;
-            cost[i * cols + slot] = match model {
-                Some(m) => -(m.prob(&feats[i][k]) as f64).max(1e-4).ln(),
-                None => score as f64 + excess,
-            };
-        }
-        cost[i * cols + real + i] = unassigned;
-    }
-    // A chord with stacks from above and below that hold more digits than it has notes: the
-    // worse of the two is not allowed there, and the page assigned again
-    let mut choice = Vec::new();
-    for _ in 0..8 {
-        if n == 0 {
-            break;
-        }
-        choice = assign::assign(&cost, n, cols);
-        let mut on_chord: HashMap<usize, Vec<usize>> = HashMap::new();
-        for (i, &slot) in choice.iter().enumerate() {
-            if slot < real && cost[i * cols + slot] < FORBIDDEN {
-                on_chord.entry(slots[slot].0).or_default().push(i);
-            }
-        }
-        let mut changed = false;
-        for (c, st) in on_chord {
-            let digits_on: usize = st.iter().map(|&i| stacks[i].len()).sum();
-            if st.len() < 2 || digits_on <= chords[c].len() {
-                continue;
-            }
-            let worst = *st
-                .iter()
-                .max_by(|&&a, &&b| {
-                    cost[a * cols + choice[a]].total_cmp(&cost[b * cols + choice[b]])
-                })
-                .unwrap();
-            cost[worst * cols + choice[worst]] = FORBIDDEN;
-            changed = true;
-        }
-        if !changed {
-            break;
         }
     }
 
