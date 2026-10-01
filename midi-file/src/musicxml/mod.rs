@@ -7,6 +7,7 @@ pub mod omr;
 mod omr_detector;
 pub mod omr_fingering;
 mod parse;
+pub mod score_reader;
 
 use std::path::Path;
 

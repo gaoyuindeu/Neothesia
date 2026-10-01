@@ -481,25 +481,44 @@ fn read_any(path: &Path) -> Result<String, String> {
 pub fn transfer_into_file(path: &Path, sources: &[String]) -> Result<TransferReport, String> {
     let target = read_any(path)?;
     let (text, report) = transfer(&target, sources)?;
-    if report.written == 0 {
-        return Ok(report);
+    if report.written > 0 {
+        write_score(path, &text)?;
     }
+    Ok(report)
+}
 
+/// `fingers` (note element, finger) added to the MusicXML text
+pub(crate) fn insert_fingers(xml: &str, fingers: &[(NodeId, u8)]) -> Result<String, String> {
+    let doc = parse_xml(xml).map_err(|e| e.to_string())?;
+    let mut edits: Vec<(usize, String)> = fingers
+        .iter()
+        .filter_map(|&(node, finger)| insertion(xml, &doc, node, finger))
+        .collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+    let mut out = xml.to_string();
+    for (at, text) in edits {
+        out.insert_str(at, &text);
+    }
+    Ok(out)
+}
+
+/// Replace the score at `path` by `text` (inside its archive for .mxl), keeping a copy of
+/// the original next to it (`<name>.bak`, made once)
+pub(crate) fn write_score(path: &Path, text: &str) -> Result<(), String> {
     let mut backup = path.as_os_str().to_owned();
     backup.push(".bak");
     let backup = std::path::PathBuf::from(backup);
     if !backup.exists() {
         std::fs::copy(path, &backup).map_err(|e| format!("Could not back up the score: {e}"))?;
     }
-
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     if bytes.starts_with(b"PK") {
-        let out = rewrite_mxl(&bytes, &text)?;
+        let out = rewrite_mxl(&bytes, text)?;
         std::fs::write(path, out).map_err(|e| format!("Could not write the score: {e}"))?;
     } else {
         std::fs::write(path, text).map_err(|e| format!("Could not write the score: {e}"))?;
     }
-    Ok(report)
+    Ok(())
 }
 
 /// The archive with its root score replaced by `text`

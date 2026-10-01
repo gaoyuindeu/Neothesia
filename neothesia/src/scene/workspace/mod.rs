@@ -96,7 +96,7 @@ impl MainView {
 /// Fingering read from a PDF going into a MusicXML score, on another thread
 struct FingeringImport {
     score: PathBuf,
-    rx: mpsc::Receiver<Result<midi_file::musicxml::TransferReport, String>>,
+    rx: mpsc::Receiver<Result<midi_file::musicxml::score_reader::Report, String>>,
 }
 
 struct Loading {
@@ -311,45 +311,28 @@ impl Workspace {
     }
 
     /// Read the PDF with Audiveris and move its fingering into `score`
-    fn run_fingering_import(&mut self, ctx: &Context, score: PathBuf, pdf: PathBuf) {
-        let Some(audiveris) = midi_file::musicxml::omr::find_audiveris(ctx.config.audiveris_path())
-        else {
-            self.status = Status::Error(
-                "Audiveris is needed to read PDFs: winget install audiveris.org.Audiveris".into(),
-            );
-            return;
-        };
+    /// Read the fingering of the printed score into `score`, on another thread
+    fn run_fingering_import(&mut self, score: PathBuf, pdf: PathBuf) {
         let (tx, rx) = mpsc::channel();
         let target = score.clone();
         std::thread::Builder::new()
             .name("fingering-import".into())
             .spawn(move || {
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let work = std::env::temp_dir()
-                    .join("neothesia_omr")
-                    .join(stamp.to_string());
-                let result = midi_file::musicxml::omr::recognize(&audiveris, &pdf, &work).and_then(
-                    |sources| midi_file::musicxml::transfer_fingering_into_file(&target, &sources),
-                );
-                std::fs::remove_dir_all(&work).ok();
+                let result = midi_file::musicxml::score_reader::read_into_file(&target, &pdf);
                 tx.send(result).ok();
             })
             .ok();
-        self.status =
-            Status::Info("Reading the PDF with Audiveris\u{2026} (can take minutes)".into());
+        self.status = Status::Info("Reading the fingering of the printed score\u{2026}".into());
         self.fingering_import = Some(FingeringImport { score, rx });
     }
 
-    fn poll_fingering_import(&mut self, ctx: &Context) {
+    fn poll_fingering_import(&mut self) {
         if let Some((_, picker)) = self.pdf_picker.as_mut() {
             let mut cx = std::task::Context::from_waker(noop_waker_ref());
             if let std::task::Poll::Ready(pdf) = picker.as_mut().poll(&mut cx) {
                 let (score, _) = self.pdf_picker.take().unwrap();
                 if let Some(pdf) = pdf {
-                    self.run_fingering_import(ctx, score, pdf);
+                    self.run_fingering_import(score, pdf);
                 }
             }
         }
@@ -364,18 +347,18 @@ impl Workspace {
         };
         let score = self.fingering_import.take().unwrap().score;
         match result {
-            Ok(report) if report.found == 0 => {
+            Ok(report) if report.digits == 0 => {
                 self.status = Status::Error("No fingering was recognized in the PDF".into());
             }
             Ok(report) => {
                 self.status = Status::Info(format!(
                     "Fingering from PDF: {} read, {} written into {}",
-                    report.found,
-                    report.written,
+                    report.digits,
+                    report.fingers,
                     file_name(&score)
                 ));
                 // Show it: open the song again
-                if report.written > 0
+                if report.fingers > 0
                     && let Some(path) = self.song_path.clone()
                 {
                     self.load(path);
@@ -505,7 +488,7 @@ impl Workspace {
 
     pub fn update(&mut self, ctx: &mut Context, delta: Duration) {
         self.poll_loading(ctx);
-        self.poll_fingering_import(ctx);
+        self.poll_fingering_import();
 
         if let Some(picker) = self.folder_picker.as_mut() {
             let mut cx = std::task::Context::from_waker(noop_waker_ref());

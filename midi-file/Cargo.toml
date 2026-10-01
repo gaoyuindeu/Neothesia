@@ -12,6 +12,11 @@ zip.workspace = true
 png.workspace = true
 rten.workspace = true
 rten-tensor.workspace = true
+hayro = "0.7"
+image.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
 
 [dev-dependencies]
 midi-io.workspace = true
