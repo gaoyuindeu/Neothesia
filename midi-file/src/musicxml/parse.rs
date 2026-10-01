@@ -46,6 +46,8 @@ pub struct RawNote {
     pub fermata: bool,
     pub arpeggiate: bool,
     pub ornament: Option<Ornament>,
+    /// Accidentals printed with the ornament for its upper and lower note, in semitones
+    pub ornament_alter: [Option<f32>; 2],
     pub fingering: Option<String>,
     pub printed: bool,
 }
@@ -449,6 +451,19 @@ fn parse_note(node: Node) -> RawNote {
                 }
                 "ornaments" => {
                     for o in n.children().filter(|o| o.is_element()) {
+                        if o.tag_name().name() == "accidental-mark" {
+                            let alter = match o.text().map(str::trim) {
+                                Some("sharp") => Some(1.0),
+                                Some("flat") => Some(-1.0),
+                                Some("natural") => Some(0.0),
+                                Some("double-sharp" | "sharp-sharp") => Some(2.0),
+                                Some("flat-flat") => Some(-2.0),
+                                _ => None,
+                            };
+                            let below = o.attribute("placement") == Some("below");
+                            note.ornament_alter[usize::from(below)] = alter;
+                            continue;
+                        }
                         note.ornament = match o.tag_name().name() {
                             "trill-mark" => Some(Ornament::Trill),
                             "turn" | "delayed-turn" => Some(Ornament::Turn),

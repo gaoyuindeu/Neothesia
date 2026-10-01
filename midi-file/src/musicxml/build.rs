@@ -236,6 +236,32 @@ fn pitch_of(letter: i32, alter: f32, octave: i32) -> (u8, i32, i8) {
     (midi.clamp(0, 127) as u8, octave * 7 + letter, alter as i8)
 }
 
+/// Alteration of a letter in the key signature (`fifths` sharps, or flats when negative)
+fn key_alter(fifths: i8, letter: i32) -> f32 {
+    // Sharps are added F C G D A E B, flats B E A D G C F
+    const SHARPS: [i32; 7] = [3, 0, 4, 1, 5, 2, 6];
+    let n = fifths.unsigned_abs() as usize;
+    if fifths > 0 && SHARPS[..n].contains(&letter) {
+        1.0
+    } else if fifths < 0 && SHARPS[7 - n..].contains(&letter) {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// Alteration of a letter and octave set earlier in the measure (on the same staff)
+fn measure_alter(placed: &[Placed], at: &Placed, letter: i32, octave: i32) -> Option<f32> {
+    placed
+        .iter()
+        .filter(|q| q.measure == at.measure && q.staff == at.staff && q.start < at.start)
+        .filter(|q| q.note.accidental.is_some())
+        .filter_map(|q| q.note.pitch)
+        .filter(|&(l, _, o)| l == letter && o == octave)
+        .last()
+        .map(|(_, a, _)| a)
+}
+
 fn velocity_for(dynamic: &str) -> Option<u8> {
     Some(match dynamic {
         "pppppp" | "ppppp" | "pppp" => 20,
@@ -651,6 +677,99 @@ pub fn build(raw: RawScore, name: String) -> Result<MidiFile, String> {
         }
     }
 
+    // Ornaments: play the notes they stand for. The main note keeps its sounding (for the
+    // notation and the fingering), which shrinks to its own part of the ornament; the
+    // other notes are added. `span` keeps the whole ornament for the notation.
+    let mut span: HashMap<usize, (u64, u64)> = HashMap::new();
+    {
+        let mut tempo_marks = tempos.clone();
+        tempo_marks.sort_by_key(|a| a.0);
+        let bpm_at = |tick: u64| {
+            tempo_marks
+                .iter()
+                .take_while(|(t, _)| *t <= tick)
+                .last()
+                .or(tempo_marks.first())
+                .map_or(DEFAULT_TEMPO, |t| t.1)
+        };
+        for (i, p) in placed.iter().enumerate() {
+            let (Some(ornament), Some(c), Some((letter, _, octave))) =
+                (p.note.ornament, chain_of[i], p.note.pitch)
+            else {
+                continue;
+            };
+            if p.note.grace || p.note.tie_stop || span.contains_key(&c) {
+                continue;
+            }
+            let neighbor = |up: bool| -> u8 {
+                let (l, o) = match (up, letter) {
+                    (true, 6) => (0, octave + 1),
+                    (true, l) => (l + 1, octave),
+                    (false, 0) => (6, octave - 1),
+                    (false, l) => (l - 1, octave),
+                };
+                let a = p.note.ornament_alter[usize::from(!up)]
+                    .or_else(|| measure_alter(&placed, p, l, o))
+                    .unwrap_or_else(|| key_alter(infos[p.measure].key, l));
+                pitch_of(l, a, o).0
+            };
+            let main = sounding[c].pitch;
+            let (start, end) = (sounding[c].start, sounding[c].end);
+            let total = end - start;
+            // About 13 notes a second, but not slower than a 16th or faster than a 64th
+            let ticks_per_sec = ppq as f64 * bpm_at(start) / 60.0;
+            let fast = ((ticks_per_sec * 0.075) as u64).clamp((ppq / 16).max(1), ppq / 4);
+
+            let pitches: Vec<u8> = match ornament {
+                Ornament::Trill => {
+                    // Alternate with the upper note to the end, ending on the main note
+                    let n = (total / fast) as usize;
+                    if n < 4 {
+                        vec![main, neighbor(true), main]
+                    } else {
+                        let n = if n.is_multiple_of(2) { n - 1 } else { n };
+                        (0..n)
+                            .map(|k| if k % 2 == 0 { main } else { neighbor(true) })
+                            .collect()
+                    }
+                }
+                Ornament::InvertedMordent => vec![main, neighbor(true), main],
+                Ornament::Mordent => vec![main, neighbor(false), main],
+                Ornament::Turn => vec![neighbor(true), main, neighbor(false), main],
+                Ornament::InvertedTurn => vec![neighbor(false), main, neighbor(true), main],
+            };
+            // Each note `step` long, the last one holds on to the end
+            let step = (total / pitches.len() as u64).min(fast).max(1);
+            if step * (pitches.len() as u64 - 1) >= total {
+                continue;
+            }
+            let velocity = sounding[c].velocity;
+            let mut main_done = false;
+            for (k, &pitch) in pitches.iter().enumerate() {
+                let s = start + k as u64 * step;
+                let e = if k + 1 == pitches.len() {
+                    end
+                } else {
+                    s + step
+                };
+                if pitch == main && !main_done {
+                    sounding[c].start = s;
+                    sounding[c].end = e;
+                    main_done = true;
+                } else {
+                    sounding.push(Sounding {
+                        staff: sounding[c].staff,
+                        pitch,
+                        start: s,
+                        end: e,
+                        velocity: velocity.saturating_sub(8).max(1),
+                    });
+                }
+            }
+            span.insert(c, (start, end));
+        }
+    }
+
     // Pedal
     let mut pedal_spans: Vec<(u64, u64)> = Vec::new();
     let mut pedal_down: Option<u64> = None;
@@ -723,7 +842,13 @@ pub fn build(raw: RawScore, name: String) -> Result<MidiFile, String> {
     let time_of = |tick: u64| tempo.pulses_to_duration(tick);
     let note_times = |i: usize| -> (std::time::Duration, std::time::Duration) {
         match chain_of[i] {
-            Some(c) => (time_of(sounding[c].start), time_of(sounding[c].end)),
+            Some(c) => {
+                let (start, end) = span
+                    .get(&c)
+                    .copied()
+                    .unwrap_or((sounding[c].start, sounding[c].end));
+                (time_of(start), time_of(end))
+            }
             None => (
                 time_of(placed[i].start),
                 time_of(placed[i].start + placed[i].duration),
