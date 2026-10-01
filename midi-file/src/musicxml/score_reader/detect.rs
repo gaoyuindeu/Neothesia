@@ -20,7 +20,7 @@ const MODEL: &[u8] = include_bytes!("detector.onnx");
 const INTERLINE: f32 = 21.0;
 /// The page goes through the network in tiles of this size (the same on the GPU and the
 /// CPU: the same page gives the same objects on every machine)
-const TILE: usize = 1536;
+const TILE: usize = 4096;
 const MARGIN: usize = 64;
 
 /// Classes 0-4: digits 1-5

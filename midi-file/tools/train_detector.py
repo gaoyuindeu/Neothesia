@@ -55,6 +55,10 @@ SMUFL_FINGERING = {1: 0xED11, 2: 0xED12, 3: 0xED13, 4: 0xED14, 5: 0xED15}
 SMUFL_MARKS = [0xE4A0, 0xE4A1, 0xE4A2, 0xE4A3, 0xE4A4, 0xE4A5, 0xE4A6, 0xE4A7, 0xE4A8, 0xE4A9,
                0xE4AA, 0xE4AB, 0xE4AC, 0xE4AD, 0xE4C0, 0xE4C1, 0xE566, 0xE56C, 0xE567, 0xE56D]
 NEG = float(os.environ.get("NEG", "0.5"))
+# Accidentals (left of heads) and dynamics letters: on scans a natural or a double sharp can look
+# like a 4 or a 1, an f or z like a digit
+SMUFL_ACCIDENTALS = [0xE260, 0xE261, 0xE262, 0xE263, 0xE264]
+SMUFL_DYNAMICS = list(range(0xE520, 0xE53F))
 
 
 def glyph_patch(path, code, size):
@@ -192,15 +196,22 @@ class Pages(torch.utils.data.Dataset):
             for _ in range(rng.randint(1, 6)):
                 _, hx0, hy0, hx1, hy1 = rng.choice(near)
                 il = max((hx1 - hx0) / 1.25, 8.0)
-                patch = glyph_patch(MUSIC_FONT, rng.choice(SMUFL_MARKS), max(8, int(4 * il * rng.uniform(0.85, 1.15))))
+                kind = rng.random()
+                code = rng.choice(SMUFL_ACCIDENTALS if kind < 0.35 else SMUFL_DYNAMICS if kind < 0.55 else SMUFL_MARKS)
+                patch = glyph_patch(MUSIC_FONT, code, max(8, int(4 * il * rng.uniform(0.85, 1.15))))
                 if patch is None:
                     continue
                 ph, pw = patch.shape
-                hcx = (hx0 + hx1) / 2 + rng.uniform(-1.6, 1.6) * il
-                if rng.random() < 0.5:
-                    y = hy0 - rng.uniform(0.2, 2.2) * il - ph
+                if kind < 0.35:
+                    # An accidental: left of the head, at its height
+                    hcx = hx0 - rng.uniform(0.1, 1.2) * il - pw / 2
+                    y = (hy0 + hy1) / 2 - ph / 2 + rng.uniform(-0.3, 0.3) * il
                 else:
-                    y = hy1 + rng.uniform(0.2, 2.2) * il
+                    hcx = (hx0 + hx1) / 2 + rng.uniform(-1.6, 1.6) * il
+                    if rng.random() < 0.5:
+                        y = hy0 - rng.uniform(0.2, 2.2 if kind >= 0.55 else 4.0) * il - ph
+                    else:
+                        y = hy1 + rng.uniform(0.2, 2.2 if kind >= 0.55 else 4.0) * il
                 px, py = int(hcx - pw / 2) - left, int(y) - top
                 if px < 0 or py < 0 or px + pw >= size or py + ph >= size:
                     continue

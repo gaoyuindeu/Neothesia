@@ -45,10 +45,10 @@ def match(found, truth, il, same_class):
 tot = {"digits": [0, 0, 0, 0], "heads": [0, 0, 0, 0]}
 for t in tests:
     name = t["name"]
-    for oracle in sorted(glob.glob(os.path.join(here, "page_cache", "oracle_both", name, "*.det.json"))):
+    for oracle in sorted(glob.glob(os.path.join(here, "page_cache", os.environ.get("ORACLE", "oracle_both"), name, "*.det.json"))):
         page = os.path.basename(oracle).split(".")[0]
         det = os.path.join(here, "page_cache", cache, name, f"{page}.det.json")
-        meta = os.path.join(here, "page_cache", "musescore", name, f"{page}.json")
+        meta = os.path.join(here, "page_cache", os.environ.get("META", "musescore"), name, f"{page}.json")
         if not os.path.exists(det) or not os.path.exists(meta):
             continue
         il = json.load(open(meta))["interline"]
