@@ -1555,6 +1555,8 @@ dependencies = [
  "midly",
  "png",
  "roxmltree 0.21.1",
+ "rten",
+ "rten-tensor",
  "zip",
 ]
 

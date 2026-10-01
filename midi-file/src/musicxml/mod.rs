@@ -4,6 +4,7 @@
 mod build;
 mod fingering_transfer;
 pub mod omr;
+mod omr_detector;
 pub mod omr_fingering;
 mod parse;
 

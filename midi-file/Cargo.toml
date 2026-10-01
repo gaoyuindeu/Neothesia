@@ -10,6 +10,8 @@ log.workspace = true
 roxmltree.workspace = true
 zip.workspace = true
 png.workspace = true
+rten.workspace = true
+rten-tensor.workspace = true
 
 [dev-dependencies]
 midi-io.workspace = true

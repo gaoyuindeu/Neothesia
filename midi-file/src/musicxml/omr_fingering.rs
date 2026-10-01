@@ -73,6 +73,10 @@ const COMPACT: &[&str] = &[
 ];
 /// Audiveris' own guesses that may be fingering: replaced by ours
 const GUESSES: &[&str] = &["fingering", "tuplet", "dynamics"];
+/// Not needed for the fingering and dropped before exporting: Audiveris 5.11 was seen
+/// failing to export whole measures with a hairpin whose time offset was unresolved
+/// ("w1.timeOffset is null" in PartwiseBuilder$WedgeIterators)
+const DROPPED: &[&str] = &["wedge"];
 
 /// What the reading found
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -854,8 +858,9 @@ fn attach(sheet: &SheetData, digits: Vec<Digit>) -> Vec<(Digit, usize)> {
         let cx = d.rect.cx();
         let home = stacks.iter_mut().find(|st| {
             let last = st.last().unwrap().rect;
-            let dy = d.rect.y0 - last.y1;
-            (cx - last.cx()).abs() < 0.6 * il && dy >= -2 && (dy as f32) < 0.7 * il
+            // Centers: boxes of stacked digits may overlap
+            let dy = d.rect.cy() - last.cy();
+            (cx - last.cx()).abs() < 0.6 * il && (0.6 * il..=2.2 * il).contains(&dy)
         });
         match home {
             Some(st) => st.push(d),
@@ -894,10 +899,12 @@ fn attach(sheet: &SheetData, digits: Vec<Digit>) -> Vec<(Digit, usize)> {
             }
             let top = sheet.heads[heads[0]].rect.y0;
             let bottom = sheet.heads[heads[heads.len() - 1]].rect.y1;
-            let (dist, above) = if sy1 <= top + 2 {
-                (top - sy1, true)
-            } else if sy0 >= bottom - 2 {
-                (sy0 - bottom, false)
+            // By the digits' centers: boxes may reach into the head
+            let (scy0, scy1) = (st[0].rect.cy(), st[st.len() - 1].rect.cy());
+            let (dist, above) = if scy1 < top as f32 {
+                ((top - sy1).max(0), true)
+            } else if scy0 > bottom as f32 {
+                ((sy0 - bottom).max(0), false)
             } else {
                 continue;
             };
@@ -1013,6 +1020,35 @@ fn decode_binary(png_bytes: &[u8]) -> Result<Bitmap, String> {
     Ok(Bitmap { w, h, px })
 }
 
+/// The box of the ink inside a predicted box (a little larger), so that boxes of stacked
+/// digits do not overlap
+fn snap_to_ink(page: &Bitmap, r: Rect) -> Rect {
+    let (x0, y0) = ((r.x0 - 2).max(0) as usize, (r.y0 - 2).max(0) as usize);
+    let (x1, y1) = (
+        ((r.x1 + 2).max(0) as usize).min(page.w.saturating_sub(1)),
+        ((r.y1 + 2).max(0) as usize).min(page.h.saturating_sub(1)),
+    );
+    let mut ink = Rect {
+        x0: i64::MAX,
+        y0: i64::MAX,
+        x1: i64::MIN,
+        y1: i64::MIN,
+    };
+    let mut n = 0;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if page.get(x, y) {
+                n += 1;
+                ink.x0 = ink.x0.min(x as i64);
+                ink.y0 = ink.y0.min(y as i64);
+                ink.x1 = ink.x1.max(x as i64);
+                ink.y1 = ink.y1.max(y as i64);
+            }
+        }
+    }
+    if n < 8 { r } else { ink }
+}
+
 /// One sheet of the project: its XML and binarized page
 struct SheetFile {
     xml_name: String,
@@ -1049,7 +1085,8 @@ fn patch_sheet(xml: &str, sheet: &SheetData, links: &[(Digit, usize)]) -> Result
         };
         if let Some(inters) = sig.children().find(|c| c.has_tag_name("inters")) {
             for e in inters.children().filter(|c| c.is_element()) {
-                if GUESSES.contains(&e.tag_name().name()) {
+                let tag = e.tag_name().name();
+                if GUESSES.contains(&tag) || DROPPED.contains(&tag) {
                     dropped.insert(e.attribute("id").unwrap_or_default().to_string());
                     let r = e.range();
                     edits.push((r.start, r.end, String::new()));
@@ -1171,26 +1208,65 @@ pub fn patch_omr(omr: &[u8]) -> Result<(Vec<u8>, DigitReport), String> {
         });
     }
 
-    // First pass: the score's confident digits become its own templates
-    let mut prepared = Vec::new();
-    let mut examples = Vec::new();
-    for s in &sheets {
-        let doc = parse(&s.xml)?;
-        let data = read_sheet(&doc, s.binary.clone());
-        let comps = candidate_components(&data);
-        find_digits(&data, &comps, &[], &mut examples);
-        prepared.push((data, comps));
-    }
-    let own = own_templates(examples);
-
     let mut report = DigitReport::default();
     let mut patched: HashMap<String, String> = HashMap::new();
-    for (s, (data, comps)) in sheets.iter().zip(prepared) {
-        let digits = find_digits(&data, &comps, &own, &mut Vec::new());
-        report.digits += digits.len();
-        let links = attach(&data, digits);
-        report.attached += links.len();
-        patched.insert(s.xml_name.clone(), patch_sheet(&s.xml, &data, &links)?);
+    let use_detector = std::env::var("NEOTHESIA_DIGITS").as_deref() != Ok("templates")
+        && super::omr_detector::available();
+    if use_detector {
+        let threshold = std::env::var("NEOTHESIA_DIGITS_THRESHOLD")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0.35);
+        for s in &sheets {
+            let doc = parse(&s.xml)?;
+            let data = read_sheet(&doc, s.binary.clone());
+            let found = super::omr_detector::detect(
+                s.binary.w,
+                s.binary.h,
+                &s.binary.px,
+                data.interline,
+                threshold,
+            )
+            .unwrap_or_default();
+            let digits: Vec<Digit> = found
+                .iter()
+                .map(|f| Digit {
+                    d: f.digit,
+                    rect: snap_to_ink(
+                        &s.binary,
+                        Rect {
+                            x0: f.x0.round() as i64,
+                            y0: f.y0.round() as i64,
+                            x1: f.x1.round() as i64,
+                            y1: f.y1.round() as i64,
+                        },
+                    ),
+                })
+                .collect();
+            report.digits += digits.len();
+            let links = attach(&data, digits);
+            report.attached += links.len();
+            patched.insert(s.xml_name.clone(), patch_sheet(&s.xml, &data, &links)?);
+        }
+    } else {
+        // First pass: the score's confident digits become its own templates
+        let mut prepared = Vec::new();
+        let mut examples = Vec::new();
+        for s in &sheets {
+            let doc = parse(&s.xml)?;
+            let data = read_sheet(&doc, s.binary.clone());
+            let comps = candidate_components(&data);
+            find_digits(&data, &comps, &[], &mut examples);
+            prepared.push((data, comps));
+        }
+        let own = own_templates(examples);
+        for (s, (data, comps)) in sheets.iter().zip(prepared) {
+            let digits = find_digits(&data, &comps, &own, &mut Vec::new());
+            report.digits += digits.len();
+            let links = attach(&data, digits);
+            report.attached += links.len();
+            patched.insert(s.xml_name.clone(), patch_sheet(&s.xml, &data, &links)?);
+        }
     }
 
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
