@@ -83,7 +83,8 @@ pub fn find(page: &Bitmap, interline: f32, thickness: f32) -> Vec<Staff> {
     // Line candidates: rows with enough long ink that are the strongest around them (a beam
     // lying on a staff line makes a thick band; its line is the strongest rows of the band,
     // the rest of the band another candidate)
-    let limit = (peak as f32 * 0.3) as usize;
+    // (a short staff, a system of one measure, has little long ink)
+    let limit = ((peak as f32 * 0.12) as usize).min((6.0 * interline) as usize);
     let reach = thickness as usize + 1;
     let strong = |y: usize| {
         let lo = y.saturating_sub(reach);
@@ -185,22 +186,38 @@ pub fn find(page: &Bitmap, interline: f32, thickness: f32) -> Vec<Staff> {
         }
         options.push((ys, inks.iter().sum::<usize>() as f32));
     }
-    // Strongest staves first, no two overlapping
+    // Strongest staves first, no two overlapping; a weak one (short lines) not right next to
+    // a strong one (ledger lines over or under a staff)
     options.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let mut taken: Vec<[f32; 5]> = Vec::new();
-    for (ys, _) in options {
-        let clash = taken.iter().any(|t| ys[0] <= t[4] && ys[4] >= t[0]);
+    let strong = options.first().map_or(0.0, |o| o.1) * 0.3;
+    let mut taken: Vec<([f32; 5], f32)> = Vec::new();
+    for (ys, ink) in options {
+        let clash = taken.iter().any(|(t, _)| {
+            // (sharing a line is overlapping too)
+            let near = if ink < strong { 2.0 } else { 0.3 } * interline;
+            ys[0] <= t[4] + near && ys[4] >= t[0] - near
+        });
         if !clash {
-            taken.push(ys);
+            taken.push((ys, ink));
         }
     }
-    taken.sort_by(|a, b| a[0].total_cmp(&b[0]));
-    taken
+    taken.sort_by(|a, b| a.0[0].total_cmp(&b.0[0]));
+    let found: Vec<(Staff, bool)> = taken
         .into_iter()
-        .map(|ys| {
+        .map(|(ys, ink)| {
             let (x0, x1) = extent(page, ys[2].round() as usize, interline);
-            Staff { lines: ys, x0, x1 }
+            (Staff { lines: ys, x0, x1 }, ink >= strong)
         })
+        .collect();
+    // A weak staff starts at the left margin like the others (a short last system does;
+    // ledger lines over a run of notes inside the page do not)
+    let mut lefts: Vec<usize> = found.iter().filter(|f| f.1).map(|f| f.0.x0).collect();
+    lefts.sort_unstable();
+    let margin = lefts.get(lefts.len() / 2).copied().unwrap_or(0) as f32;
+    found
+        .into_iter()
+        .filter(|(st, is_strong)| *is_strong || (st.x0 as f32 - margin).abs() < 3.0 * interline)
+        .map(|(st, _)| st)
         .collect()
 }
 
