@@ -925,7 +925,6 @@ fn attach(
     // fingering under a chord and over the chord below it): split at its widest space, and
     // the page assigned again
     const FORBIDDEN: f64 = 1e6;
-    let mut stacks = stacks;
     let mut round = 0;
     let (stacks, cands, feats, choice, cost, slots, real, cols) = loop {
         round += 1;
