@@ -4,6 +4,7 @@
 mod build;
 mod fingering_transfer;
 pub mod omr;
+pub mod omr_fingering;
 mod parse;
 
 use std::path::Path;

@@ -21,7 +21,9 @@ fn mxl_files(dir: &Path) -> Vec<PathBuf> {
             let p = entry.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mxl")) {
+            } else if p.extension().is_some_and(|e| {
+                e.eq_ignore_ascii_case("mxl") || e.eq_ignore_ascii_case("musicxml")
+            }) {
                 out.push(p);
             }
         }

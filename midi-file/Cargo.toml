@@ -9,6 +9,7 @@ midly.workspace = true
 log.workspace = true
 roxmltree.workspace = true
 zip.workspace = true
+png.workspace = true
 
 [dev-dependencies]
 midi-io.workspace = true

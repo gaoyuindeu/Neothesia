@@ -52,31 +52,30 @@ pub fn find_audiveris(configured: Option<&Path>) -> Option<PathBuf> {
 pub fn recognize(audiveris: &Path, input: &Path, work_dir: &Path) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(work_dir).map_err(|e| e.to_string())?;
 
-    let mut command = Command::new(audiveris);
-    command
-        .arg("-batch")
-        .arg("-transcribe")
-        .arg("-export")
-        .arg("-constant")
-        .arg(FINGERINGS_SWITCH)
-        .arg("-output")
-        .arg(work_dir)
-        .arg("--")
-        .arg(input);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // No console window popping up
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    let output = command
-        .output()
-        .map_err(|e| format!("Could not run Audiveris ({}): {e}", audiveris.display()))?;
+    let output = run(
+        audiveris,
+        &[
+            "-batch".as_ref(),
+            "-transcribe".as_ref(),
+            "-export".as_ref(),
+            "-constant".as_ref(),
+            FINGERINGS_SWITCH.as_ref(),
+            "-output".as_ref(),
+            work_dir.as_os_str(),
+            "--".as_ref(),
+            input.as_os_str(),
+        ],
+    )?;
 
-    let mut scores: Vec<PathBuf> = Vec::new();
-    collect_mxl(work_dir, &mut scores);
-    scores.sort();
+    // Our own reading of the digits, exported by Audiveris again
+    let mut scores = Vec::new();
+    match read_digits(audiveris, work_dir) {
+        Ok(fingered) => scores = fingered,
+        Err(err) => log::warn!("Reading fingering digits: {err}"),
+    }
+    if scores.is_empty() {
+        scores = mxl_files(work_dir);
+    }
     if scores.is_empty() {
         let log = String::from_utf8_lossy(&output.stderr);
         let tail: String = log.lines().rev().take(5).collect::<Vec<_>>().join(" | ");
@@ -94,19 +93,67 @@ pub fn recognize(audiveris: &Path, input: &Path, work_dir: &Path) -> Result<Vec<
     scores.iter().map(|p| super::read_file(p)).collect()
 }
 
-fn collect_mxl(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_mxl(&path, out);
-        } else if path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("mxl"))
-        {
-            out.push(path);
-        }
+fn run(audiveris: &Path, args: &[&std::ffi::OsStr]) -> Result<std::process::Output, String> {
+    let mut command = Command::new(audiveris);
+    command.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // No console window popping up
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
+    command
+        .output()
+        .map_err(|e| format!("Could not run Audiveris ({}): {e}", audiveris.display()))
+}
+
+/// The .mxl files right in `dir`, in name order
+fn mxl_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mxl")))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Find the fingering digits in the project Audiveris left in `work_dir`
+/// (see [`super::omr_fingering`]) and export it again; the new MusicXML files
+fn read_digits(audiveris: &Path, work_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let project = std::fs::read_dir(work_dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("omr")))
+        .ok_or("no Audiveris project")?;
+    let bytes = std::fs::read(&project).map_err(|e| e.to_string())?;
+    let (patched, report) = super::omr_fingering::patch_omr(&bytes)?;
+    log::info!(
+        "Fingering digits: {} found, {} attached to notes",
+        report.digits,
+        report.attached
+    );
+
+    let dir = work_dir.join("fingered");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(project.file_name().unwrap());
+    std::fs::write(&path, patched).map_err(|e| e.to_string())?;
+    run(
+        audiveris,
+        &[
+            "-batch".as_ref(),
+            "-export".as_ref(),
+            "--".as_ref(),
+            path.as_os_str(),
+        ],
+    )?;
+    let scores = mxl_files(&dir);
+    if scores.is_empty() {
+        return Err("Audiveris did not export the fingered project".into());
+    }
+    Ok(scores)
 }
