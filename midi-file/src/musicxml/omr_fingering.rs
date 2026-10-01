@@ -222,8 +222,50 @@ fn normalize(mask: &Bitmap) -> Option<(Vec<f32>, f32)> {
 }
 
 /// Best digit, its score and its lead over the second best
+/// Bold print (heavy scans): erode until the ink share looks like a normal font
+fn thin(mask: &Bitmap) -> Bitmap {
+    let mut mask = mask.clone();
+    for _ in 0..2 {
+        let ink = mask.px.iter().filter(|&&p| p).count();
+        if ink == 0 {
+            break;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+        for y in 0..mask.h {
+            for x in 0..mask.w {
+                if mask.get(x, y) {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        let area = (x1 - x0 + 1) * (y1 - y0 + 1);
+        if ink as f32 / area as f32 <= 0.45 {
+            break;
+        }
+        let mut eroded = mask.clone();
+        for y in 0..mask.h {
+            for x in 0..mask.w {
+                let keep = mask.get(x, y)
+                    && (y == 0 || mask.get(x, y - 1))
+                    && (y + 1 == mask.h || mask.get(x, y + 1))
+                    && (x == 0 || mask.get(x - 1, y))
+                    && (x + 1 == mask.w || mask.get(x + 1, y));
+                eroded.set(x, y, keep);
+            }
+        }
+        if (eroded.px.iter().filter(|&&p| p).count() as f32) < 0.4 * ink as f32 {
+            break;
+        }
+        mask = eroded;
+    }
+    mask
+}
+
 fn classify(mask: &Bitmap, own: &[Template]) -> Option<(u8, f32, f32, Vec<f32>, f32)> {
-    let (v, aspect) = normalize(mask)?;
+    let (v, aspect) = normalize(&thin(mask))?;
     let mut best = [f32::MIN; 6];
     for t in templates().iter().chain(own) {
         let dot: f32 = v.iter().zip(&t.v).map(|(a, b)| a * b).sum();
@@ -582,7 +624,68 @@ fn candidate_components(sheet: &SheetData) -> Vec<Component> {
         };
         a.pixels.extend(b.pixels);
     }
-    comps
+    comps.into_iter().flat_map(|c| split_stack(c, il)).collect()
+}
+
+/// Digits of a chord stacked so close that they touch: cut at the thin rows
+fn split_stack(c: Component, il: f32) -> Vec<Component> {
+    let (w, h) = (
+        (c.rect.x1 - c.rect.x0 + 1) as usize,
+        (c.rect.y1 - c.rect.y0 + 1) as usize,
+    );
+    if !(h as f32 > 1.8 * il && h as f32 <= 6.0 * il && (0.2 * il..=1.4 * il).contains(&(w as f32)))
+    {
+        return vec![c];
+    }
+    let mut profile = vec![0usize; h];
+    for &(_, y) in &c.pixels {
+        profile[y as usize - c.rect.y0 as usize] += 1;
+    }
+    let limit = ((0.2 * w as f32) as usize).max(1);
+    let neck: Vec<bool> = profile.iter().map(|&n| n <= limit).collect();
+    let mut cuts = vec![0usize];
+    let mut y = 0;
+    while y < h {
+        if neck[y] {
+            let start = y;
+            while y < h && neck[y] {
+                y += 1;
+            }
+            let cut = (start + y) / 2;
+            if (cut - cuts[cuts.len() - 1]) as f32 >= 0.45 * il && (h - cut) as f32 >= 0.45 * il {
+                cuts.push(cut);
+            }
+        }
+        y += 1;
+    }
+    cuts.push(h);
+    if cuts.len() <= 2 {
+        return vec![c];
+    }
+    let mut out = Vec::new();
+    for pair in cuts.windows(2) {
+        let (top, bottom) = (pair[0], pair[1]);
+        let pixels: Vec<(u32, u32)> = c
+            .pixels
+            .iter()
+            .copied()
+            .filter(|&(_, y)| {
+                let r = y as usize - c.rect.y0 as usize;
+                r >= top && r < bottom && profile[r] > limit
+            })
+            .collect();
+        if pixels.is_empty() {
+            continue;
+        }
+        let rect = Rect {
+            x0: pixels.iter().map(|p| p.0 as i64).min().unwrap(),
+            y0: pixels.iter().map(|p| p.1 as i64).min().unwrap(),
+            x1: pixels.iter().map(|p| p.0 as i64).max().unwrap(),
+            y1: pixels.iter().map(|p| p.1 as i64).max().unwrap(),
+        };
+        out.push(Component { rect, pixels });
+    }
+    out
 }
 
 fn mask_of(c: &Component) -> Bitmap {
@@ -613,12 +716,19 @@ fn digit_sized(c: &Component, il: f32) -> bool {
     (0.5 * il..=1.8 * il).contains(&h) && (0.2 * il..=1.4 * il).contains(&w)
 }
 
+/// A digit seen clearly enough to learn the score's font from
+struct Example {
+    margin: f32,
+    confident: bool,
+    template: Template,
+}
+
 /// Digits of a sheet; `own` are the templates of the score's font (second pass)
 fn find_digits(
     sheet: &SheetData,
     comps: &[Component],
     own: &[Template],
-    confident: &mut Vec<Template>,
+    examples: &mut Vec<Example>,
 ) -> Vec<Digit> {
     let il = sheet.interline;
     let threshold = if own.is_empty() { 0.55 } else { 0.62 };
@@ -627,11 +737,15 @@ fn find_digits(
         let Some((d, score, margin, v, aspect)) = classify(&mask_of(c), own) else {
             continue;
         };
-        if score >= 0.7 && margin >= 0.15 {
-            confident.push(Template {
-                digit: d,
-                aspect,
-                v,
+        if score >= 0.45 && margin >= 0.15 {
+            examples.push(Example {
+                margin,
+                confident: score >= 0.7,
+                template: Template {
+                    digit: d,
+                    aspect,
+                    v,
+                },
             });
         }
         if (score >= threshold && margin >= 0.04) || (score >= 0.5 && margin >= 0.2) {
@@ -658,8 +772,45 @@ fn find_digits(
     digits
 }
 
-/// The score's own templates: the mean of its confident digits
-fn own_templates(confident: Vec<Template>) -> Vec<Template> {
+/// The score's own templates: the mean of its confident digits, or of the clearest
+/// plausible ones when its font is far from the generic templates (bold scans)
+fn own_templates(examples: Vec<Example>) -> Vec<Template> {
+    let confident_digits = (1..=5u8)
+        .filter(|&d| {
+            examples
+                .iter()
+                .filter(|e| e.confident && e.template.digit == d)
+                .count()
+                >= 5
+        })
+        .count();
+    let mut chosen: Vec<Template> = Vec::new();
+    if confident_digits >= 3 {
+        chosen.extend(
+            examples
+                .into_iter()
+                .filter(|e| e.confident)
+                .map(|e| e.template),
+        );
+    } else {
+        for d in 1..=5u8 {
+            let mut found: Vec<Example> = Vec::new();
+            for e in examples.iter().filter(|e| e.template.digit == d) {
+                found.push(Example {
+                    margin: e.margin,
+                    confident: e.confident,
+                    template: Template {
+                        digit: d,
+                        aspect: e.template.aspect,
+                        v: e.template.v.clone(),
+                    },
+                });
+            }
+            found.sort_by(|a, b| b.margin.total_cmp(&a.margin));
+            chosen.extend(found.into_iter().take(30).map(|e| e.template));
+        }
+    }
+    let confident = chosen;
     let mut out = Vec::new();
     for d in 1..=5u8 {
         let examples: Vec<&Template> = confident.iter().filter(|t| t.digit == d).collect();
@@ -1022,15 +1173,15 @@ pub fn patch_omr(omr: &[u8]) -> Result<(Vec<u8>, DigitReport), String> {
 
     // First pass: the score's confident digits become its own templates
     let mut prepared = Vec::new();
-    let mut confident = Vec::new();
+    let mut examples = Vec::new();
     for s in &sheets {
         let doc = parse(&s.xml)?;
         let data = read_sheet(&doc, s.binary.clone());
         let comps = candidate_components(&data);
-        find_digits(&data, &comps, &[], &mut confident);
+        find_digits(&data, &comps, &[], &mut examples);
         prepared.push((data, comps));
     }
-    let own = own_templates(confident);
+    let own = own_templates(examples);
 
     let mut report = DigitReport::default();
     let mut patched: HashMap<String, String> = HashMap::new();
