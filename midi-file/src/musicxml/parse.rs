@@ -547,6 +547,24 @@ fn parse_direction(node: Node) -> RawDirection {
             direction.kinds.push(kind);
         }
     }
+    // A block of text (verses of a song, notes) set in the score as words: lines of text, or
+    // long; not a performance indication, not drawn on the staff
+    let words: Vec<&str> = node
+        .descendants()
+        .filter(|n| n.has_tag_name("words"))
+        .filter_map(|n| n.text())
+        .collect();
+    let block = words.iter().any(|w| w.contains('\n'))
+        || words
+            .iter()
+            .map(|w| w.trim().chars().count())
+            .sum::<usize>()
+            > 80;
+    if block {
+        direction
+            .kinds
+            .retain(|k| !matches!(k, RawDirectionKind::Words { .. }));
+    }
     direction
 }
 

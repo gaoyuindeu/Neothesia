@@ -1,3 +1,6 @@
+// A window app on Windows: no console window next to it (release builds; debug builds keep
+// the console for the log)
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![allow(clippy::collapsible_match, clippy::single_match)]
 
 mod context;

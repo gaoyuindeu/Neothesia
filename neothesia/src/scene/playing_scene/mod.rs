@@ -70,6 +70,17 @@ impl PlayingScene {
         self.player.pause();
     }
 
+    /// Position in the song (with the lead-in), and whether it is paused: to rebuild the
+    /// scene where it was
+    pub fn position(&self) -> (std::time::Duration, bool) {
+        (self.player.time(), self.player.is_paused())
+    }
+
+    pub fn seek(&mut self, time: std::time::Duration) {
+        self.player.set_time(time);
+        self.keyboard.reset_notes();
+    }
+
     pub fn new(ctx: &mut Context, song: Song) -> Self {
         let keyboard = Keyboard::new(ctx, song.config.clone());
 
@@ -159,10 +170,11 @@ impl PlayingScene {
                     score,
                     ctx.quad_renderer_factory.new_renderer(),
                     ctx.text_renderer_factory.new_renderer(),
+                    // Paper: black notes on white, as printed
                     SheetColors {
-                        background: [0.008, 0.008, 0.016, 1.0],
-                        ink: [225, 225, 235],
-                        played: [120, 120, 135],
+                        background: [1.0, 1.0, 1.0, 1.0],
+                        ink: [0, 0, 0],
+                        played: [150, 150, 150],
                         hands: [
                             hand_color(midi_file::Hand::Right),
                             hand_color(midi_file::Hand::Left),

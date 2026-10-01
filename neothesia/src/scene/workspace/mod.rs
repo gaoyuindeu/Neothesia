@@ -26,7 +26,7 @@ use crate::{
         playing_scene::PlayingScene,
         render_nuon,
     },
-    song::Song,
+    song::{PlayerConfig, Song},
     utils::{BoxFuture, noop_waker_ref},
 };
 
@@ -54,7 +54,6 @@ const ERROR: [u8; 3] = [255, 120, 120];
 
 mod icon {
     pub const LIBRARY: &str = "\u{F3C2}";
-    pub const TRACKS: &str = "\u{F49F}";
     pub const KEYBOARD: &str = "\u{F451}";
     pub const PDF: &str = "\u{F63E}";
     pub const SETTINGS: &str = "\u{F3E5}";
@@ -122,6 +121,9 @@ enum Action {
     Page(Page),
     Freeplay,
     ImportFingering,
+    /// How a track is played (hand controls over the player)
+    SetPlayer(usize, PlayerConfig),
+    ToggleVisible(usize),
 }
 
 pub struct Workspace {
@@ -157,6 +159,9 @@ pub struct Workspace {
     /// start playing, once the first song is loaded (for frame dumps)
     start_page: Option<Page>,
     start_playing: bool,
+
+    /// Logical rectangle of the hand controls over the player (clicks there are theirs)
+    hands_rect: Option<[f32; 4]>,
 
     /// Physical rectangles for rendering: main view and the whole window
     view_px: [u32; 4],
@@ -205,6 +210,7 @@ impl Workspace {
                 _ => None,
             },
             start_playing: std::env::var("NEOTHESIA_START_PAGE").as_deref() == Ok("play"),
+            hands_rect: None,
             view_px: [0; 4],
             window_px: [1, 1],
         };
@@ -576,6 +582,14 @@ impl Workspace {
             Action::StartResize(offset) => self.divider_drag = Some(offset),
             Action::Page(page) => self.toggle_page(ctx, page),
             Action::ImportFingering => self.start_fingering_import(),
+            Action::SetPlayer(track, player) => {
+                self.change_tracks(ctx, |config| config.tracks[track].player = player);
+            }
+            Action::ToggleVisible(track) => {
+                self.change_tracks(ctx, |config| {
+                    config.tracks[track].visible = !config.tracks[track].visible;
+                });
+            }
             Action::Freeplay => match self.main {
                 MainView::Freeplay(_) => self.back(ctx, None),
                 _ => self.show_freeplay(ctx),
@@ -587,7 +601,10 @@ impl Workspace {
 
     pub fn window_event(&mut self, ctx: &mut Context, event: &WindowEvent) {
         let cursor = ctx.full_window_state.cursor_logical_position;
-        let in_sidebar = cursor.x >= 0.0 && cursor.x < self.sidebar_w();
+        let in_hands = self.hands_rect.is_some_and(|[x, y, w, h]| {
+            cursor.x >= x && cursor.x < x + w && cursor.y >= y && cursor.y < y + h
+        });
+        let in_sidebar = (cursor.x >= 0.0 && cursor.x < self.sidebar_w()) || in_hands;
 
         match event {
             WindowEvent::CursorMoved { .. } => {
@@ -742,9 +759,153 @@ impl Workspace {
                 self.panel(ui, h, &mut actions);
             });
         }
+        self.hands_rect = None;
+        if matches!(self.main, MainView::Playing(_)) {
+            self.hand_controls(ctx, &mut ui, &mut actions);
+        }
 
         self.nuon = ui;
         actions
+    }
+
+    /// Change how the song's tracks are played and rebuild the player where it was
+    fn change_tracks(
+        &mut self,
+        ctx: &mut Context,
+        change: impl FnOnce(&mut crate::song::SongConfig),
+    ) {
+        let Some(mut song) = self.song.clone() else {
+            return;
+        };
+        change(&mut song.config);
+        let position = match &self.main {
+            MainView::Playing(scene) => Some(scene.position()),
+            _ => None,
+        };
+        connect_io(ctx);
+        let mut scene = PlayingScene::new(ctx, song.clone());
+        if let Some((time, paused)) = position {
+            scene.seek(time);
+            if paused {
+                scene.pause();
+            }
+        }
+        self.song = Some(song);
+        self.main = MainView::Playing(Box::new(scene));
+    }
+
+    /// The hands (tracks) of the song over the player, under the sheet music: a dot shows or
+    /// hides the track's falling notes, the button beside it cycles Auto, Human (you play
+    /// it) and Mute
+    fn hand_controls(&mut self, ctx: &Context, ui: &mut nuon::Ui, actions: &mut Vec<Action>) {
+        let Some(song) = self.song.as_ref() else {
+            return;
+        };
+        let tracks: Vec<_> = song
+            .file
+            .tracks
+            .iter()
+            .filter(|t| !t.notes.is_empty())
+            .collect();
+        if tracks.is_empty() {
+            return;
+        }
+        let view = ctx.window_state.logical_size;
+        let sheet_h = if ctx.config.sheet_music() {
+            let staff_space = (view.height * 0.012).clamp(8.0, 14.0);
+            neothesia_core::render::SheetRenderer::height_for(staff_space)
+        } else {
+            0.0
+        };
+        const ROW: f32 = 28.0;
+        const W: f32 = 196.0;
+        let x = self.sidebar_w() + view.width - W - 12.0;
+        let y = sheet_h + 10.0;
+        let h = ROW * tracks.len() as f32 + 8.0;
+        self.hands_rect = Some([x, y, W, h]);
+
+        nuon::quad()
+            .pos(x, y)
+            .size(W, h)
+            .color(nuon::Color::new_u8(21, 20, 25, 0.82))
+            .border_radius([8.0; 4])
+            .build(ui);
+        for (row, track) in tracks.iter().enumerate() {
+            let config = &song.config.tracks[track.track_id];
+            let ry = y + 4.0 + row as f32 * ROW;
+            let color = if config.visible {
+                let schema = ctx.config.color_schema();
+                let (r, g, b) = schema[track.track_color_id % schema.len()].base;
+                [r, g, b]
+            } else {
+                [90, 88, 100]
+            };
+            let dot = nuon::click_area(("hand_dot", track.track_id))
+                .pos(x + 6.0, ry)
+                .size(22.0, ROW)
+                .build(ui);
+            nuon::quad()
+                .pos(x + 10.0, ry + 8.0)
+                .size(12.0, 12.0)
+                .color(color)
+                .border_radius([6.0; 4])
+                .build(ui);
+            if dot.is_clicked() {
+                actions.push(Action::ToggleVisible(track.track_id));
+            }
+            let name = match track.hand {
+                Some(midi_file::Hand::Right) => "Right hand".to_string(),
+                Some(midi_file::Hand::Left) => "Left hand".to_string(),
+                None if track.has_drums && !track.has_other_than_drums => "Percussion".to_string(),
+                None => {
+                    let program = track
+                        .programs
+                        .last()
+                        .map(|p| p.program as usize)
+                        .unwrap_or(0);
+                    ellipsize(midi_file::INSTRUMENT_NAMES[program], 92.0, 13.0)
+                }
+            };
+            nuon::label()
+                .text(name)
+                .pos(x + 30.0, ry)
+                .size(96.0, ROW)
+                .font_size(13.0)
+                .color(if config.visible { TEXT } else { TEXT_DIM })
+                .text_justify(TextAlign::Start)
+                .build(ui);
+            let (label, next) = match config.player {
+                PlayerConfig::Auto => ("Auto", PlayerConfig::Human),
+                PlayerConfig::Human => ("You play", PlayerConfig::Mute),
+                PlayerConfig::Mute => ("Mute", PlayerConfig::Auto),
+            };
+            let mode = nuon::click_area(("hand_mode", track.track_id))
+                .pos(x + W - 76.0, ry + 3.0)
+                .size(70.0, ROW - 6.0)
+                .build(ui);
+            let bg = match config.player {
+                PlayerConfig::Human => color,
+                _ if mode.is_hovered() => HOVER,
+                _ => SELECTED,
+            };
+            nuon::quad()
+                .pos(x + W - 76.0, ry + 3.0)
+                .size(70.0, ROW - 6.0)
+                .color(bg)
+                .border_radius([11.0; 4])
+                .build(ui);
+            nuon::label()
+                .text(label)
+                .pos(x + W - 76.0, ry + 3.0)
+                .size(70.0, ROW - 6.0)
+                .font_size(12.0)
+                .color(TEXT)
+                .text_justify(TextAlign::Center)
+                .build(ui);
+            if mode.is_clicked() {
+                actions.push(Action::SetPlayer(track.track_id, next));
+            }
+        }
     }
 
     fn activity_bar(&self, ui: &mut nuon::Ui, h: f32, actions: &mut Vec<Action>) {
@@ -762,21 +923,15 @@ impl Workspace {
                 Action::ToggleLibrary,
             ),
             (
-                icon::TRACKS,
-                page == Some(Page::TrackSelection),
-                ACTIVITY_W,
-                Action::Page(Page::TrackSelection),
-            ),
-            (
                 icon::KEYBOARD,
                 matches!(self.main, MainView::Freeplay(_)),
-                ACTIVITY_W * 2.0,
+                ACTIVITY_W,
                 Action::Freeplay,
             ),
             (
                 icon::PDF,
                 self.fingering_import.is_some() || self.pdf_picker.is_some(),
-                ACTIVITY_W * 3.0,
+                ACTIVITY_W * 2.0,
                 Action::ImportFingering,
             ),
             (
