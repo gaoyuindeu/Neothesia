@@ -54,6 +54,62 @@ struct Neothesia {
     surface: Surface,
     is_occluded: bool,
     frame_dump: Option<FrameDump>,
+    frame_log: Option<FrameLog>,
+}
+
+/// Debugging aid: `NEOTHESIA_FRAME_LOG=<file>` writes every slow frame (over 25 ms) with
+/// where its time went, and a summary each second
+struct FrameLog {
+    file: std::fs::File,
+    start: std::time::Instant,
+    /// Milliseconds: wait for the surface texture, encode, submit (until the GPU is done),
+    /// present
+    render: [f32; 4],
+    second: u64,
+    frames: u32,
+    worst: f32,
+}
+
+impl FrameLog {
+    fn from_env() -> Option<Self> {
+        let path = std::env::var_os("NEOTHESIA_FRAME_LOG")?;
+        Some(Self {
+            file: std::fs::File::create(path).ok()?,
+            start: std::time::Instant::now(),
+            render: [0.0; 4],
+            second: 0,
+            frames: 0,
+            worst: 0.0,
+        })
+    }
+
+    fn frame(&mut self, delta: Duration, update: f32) {
+        use std::io::Write;
+        let t = self.start.elapsed().as_secs_f64();
+        let ms = delta.as_secs_f32() * 1000.0;
+        let [acquire, encode, submit, present] = self.render;
+        if ms > 25.0 || update > 4.0 || encode > 4.0 || submit > 4.0 || present > 4.0 {
+            writeln!(
+                self.file,
+                "{t:9.3} slow {ms:6.1} ms  update {update:5.1}  acquire {acquire:5.1}  \
+                 encode {encode:5.1}  submit {submit:5.1}  present {present:5.1}"
+            )
+            .ok();
+        }
+        self.frames += 1;
+        self.worst = self.worst.max(ms);
+        if t as u64 != self.second {
+            writeln!(
+                self.file,
+                "{t:9.3} second {}: {} frames, worst {:.1} ms",
+                self.second, self.frames, self.worst
+            )
+            .ok();
+            self.second = t as u64;
+            self.frames = 0;
+            self.worst = 0.0;
+        }
+    }
 }
 
 /// Debugging aid: `NEOTHESIA_FRAME_DUMP=<dir>` saves a frame at each time listed in
@@ -89,6 +145,12 @@ impl Neothesia {
         context.resize();
         let workspace = Workspace::new(&mut context);
         context.gpu.submit();
+        let frame_log = FrameLog::from_env().map(|mut log| {
+            use std::io::Write;
+            let info = context.gpu.adapter.get_info();
+            writeln!(log.file, "adapter: {} ({:?})", info.name, info.backend).ok();
+            log
+        });
 
         Self {
             context,
@@ -96,6 +158,7 @@ impl Neothesia {
             workspace,
             is_occluded: false,
             frame_dump: FrameDump::from_env(),
+            frame_log,
         }
     }
 
@@ -152,8 +215,13 @@ impl Neothesia {
                 let delta = self.context.frame_timestamp.elapsed();
                 self.context.frame_timestamp = std::time::Instant::now();
 
+                let update_start = std::time::Instant::now();
                 self.update(delta);
+                let update = update_start.elapsed().as_secs_f32() * 1000.0;
                 self.render();
+                if let Some(log) = self.frame_log.as_mut() {
+                    log.frame(delta, update);
+                }
                 profiling::finish_frame!();
             }
             WindowEvent::CloseRequested => {
@@ -212,6 +280,13 @@ impl Neothesia {
 
     #[profiling::function]
     fn render(&mut self) {
+        let mut clock = std::time::Instant::now();
+        let mut lap = |log: &mut Option<FrameLog>, k: usize| {
+            if let Some(log) = log {
+                log.render[k] = clock.elapsed().as_secs_f32() * 1000.0;
+            }
+            clock = std::time::Instant::now();
+        };
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => texture,
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => {
@@ -238,14 +313,28 @@ impl Neothesia {
             wgpu::CurrentSurfaceTexture::Validation => unreachable!(),
         };
 
+        lap(&mut self.frame_log, 0);
         let view = &frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         self.encode_frame(view, frame.texture.size());
         let dump = self.encode_frame_dump(frame.texture.size());
+        lap(&mut self.frame_log, 1);
 
         self.context.gpu.submit();
+        // With the log on, wait for the GPU, so `submit` is the GPU's time for the frame
+        if self.frame_log.is_some() {
+            self.context
+                .gpu
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .ok();
+        }
+        lap(&mut self.frame_log, 2);
 
         if let Some(dump) = dump {
             self.save_frame_dump(dump);
@@ -253,6 +342,7 @@ impl Neothesia {
 
         self.context.window.pre_present_notify();
         self.context.gpu.queue.present(frame);
+        lap(&mut self.frame_log, 3);
         self.context.text_renderer_factory.end_frame();
         self.workspace.end_frame();
     }
