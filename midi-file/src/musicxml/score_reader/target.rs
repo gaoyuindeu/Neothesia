@@ -16,6 +16,8 @@ pub struct Note {
     pub has_fingering: bool,
     /// The tuplet the note is in (an id over the score) and the number printed for it, if any
     pub tuplet: Option<(usize, Option<u8>)>,
+    /// A staccatissimo / spiccato wedge printed at the note (a short upright stroke, like a 1)
+    pub wedge: bool,
 }
 
 fn child<'a, 'i>(node: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
@@ -206,6 +208,9 @@ pub fn notes(doc: &Document) -> (usize, Vec<Note>) {
                             node: el.id(),
                             has_fingering,
                             tuplet,
+                            wedge: el.descendants().any(|d| {
+                                d.has_tag_name("staccatissimo") || d.has_tag_name("spiccato")
+                            }),
                         });
                     }
                     _ => {}

@@ -97,13 +97,17 @@ pub fn find(page: &Bitmap, interline: f32, thickness: f32) -> Vec<Staff> {
         if strong(y) {
             let start = y;
             let mut ink = 0;
+            let mut longest = 0;
             let mut weighted = 0.0;
             while y < page.h && strong(y) && y - start <= (3.0 * thickness) as usize + 2 {
                 ink += rows[y];
+                longest = longest.max(rows[y]);
                 weighted += y as f32 * rows[y] as f32;
                 y += 1;
             }
-            lines.push((weighted / ink as f32, ink));
+            // Strength: the longest row (a staff line runs the width of the staff; ledger
+            // lines, often thicker, are short)
+            lines.push((weighted / ink as f32, longest));
         } else {
             y += 1;
         }
@@ -113,63 +117,87 @@ pub fn find(page: &Bitmap, interline: f32, thickness: f32) -> Vec<Staff> {
     // staff, ledger lines, hairpins) can sit between them: from each candidate as the top
     // line, the candidates nearest to where the next lines should be
     let tolerance = (0.2 * interline).max(2.0);
-    let mut options: Vec<([usize; 5], f32)> = Vec::new();
+    // (rows of the five lines, ink)
+    let mut options: Vec<([f32; 5], f32)> = Vec::new();
     for top in 0..lines.len() {
-        let mut picked = [top; 5];
+        let mut ys = [lines[top].0; 5];
+        let mut inks = [lines[top].1; 5];
+        let mut last = top;
+        let mut real = 1;
         let mut gap = interline;
         let mut ok = true;
         for k in 1..5 {
-            let want = lines[picked[k - 1]].0 + gap;
-            let Some(next) = (picked[k - 1] + 1..lines.len())
+            let want = ys[k - 1] + gap;
+            let next = (last + 1..lines.len())
                 .take_while(|&c| lines[c].0 <= want + tolerance)
                 .filter(|&c| (lines[c].0 - want).abs() <= tolerance)
                 .min_by(|&a, &b| {
                     (lines[a].0 - want)
                         .abs()
                         .total_cmp(&(lines[b].0 - want).abs())
-                })
-            else {
-                ok = false;
-                break;
-            };
-            picked[k] = next;
+                });
+            match next {
+                Some(c) => {
+                    ys[k] = lines[c].0;
+                    inks[k] = lines[c].1;
+                    last = c;
+                    real += 1;
+                }
+                // A line inside a band of ink (a beam lying on it): long ink where it should
+                // be is enough, from the third line on
+                None if k >= 2 => {
+                    let lo = (want - tolerance).max(0.0) as usize;
+                    let hi = ((want + tolerance) as usize).min(rows.len() - 1);
+                    let Some(y) = (lo..=hi).max_by_key(|&y| rows[y]) else {
+                        ok = false;
+                        break;
+                    };
+                    if rows[y] < limit {
+                        ok = false;
+                        break;
+                    }
+                    ys[k] = y as f32;
+                    inks[k] = rows[y];
+                    while last + 1 < lines.len() && lines[last + 1].0 <= want + tolerance {
+                        last += 1;
+                    }
+                }
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
             if k == 1 {
-                gap = lines[next].0 - lines[top].0;
+                gap = ys[1] - ys[0];
                 if !(0.75 * interline..=1.3 * interline).contains(&gap) {
                     ok = false;
                     break;
                 }
             }
         }
-        if !ok {
+        if !ok || real < 3 {
             continue;
         }
         // Staff lines are about equally long; a beam taken for a line is shorter
-        let inks: Vec<usize> = picked.iter().map(|&c| lines[c].1).collect();
         let (lo, hi) = (*inks.iter().min().unwrap(), *inks.iter().max().unwrap());
         if (lo as f32) < 0.15 * hi as f32 {
             continue;
         }
-        options.push((picked, inks.iter().sum::<usize>() as f32));
+        options.push((ys, inks.iter().sum::<usize>() as f32));
     }
-    // Strongest staves first, no two sharing a line or overlapping
+    // Strongest staves first, no two overlapping
     options.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let mut taken: Vec<[usize; 5]> = Vec::new();
-    for (picked, _) in options {
-        let (top, bottom) = (lines[picked[0]].0, lines[picked[4]].0);
-        let clash = taken.iter().any(|t| {
-            let (t0, t4) = (lines[t[0]].0, lines[t[4]].0);
-            top <= t4 && bottom >= t0
-        });
+    let mut taken: Vec<[f32; 5]> = Vec::new();
+    for (ys, _) in options {
+        let clash = taken.iter().any(|t| ys[0] <= t[4] && ys[4] >= t[0]);
         if !clash {
-            taken.push(picked);
+            taken.push(ys);
         }
     }
-    taken.sort_by(|a, b| lines[a[0]].0.total_cmp(&lines[b[0]].0));
+    taken.sort_by(|a, b| a[0].total_cmp(&b[0]));
     taken
         .into_iter()
-        .map(|picked| {
-            let ys = picked.map(|c| lines[c].0);
+        .map(|ys| {
             let (x0, x1) = extent(page, ys[2].round() as usize, interline);
             Staff { lines: ys, x0, x1 }
         })

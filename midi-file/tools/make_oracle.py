@@ -8,7 +8,11 @@ Writes page_cache/oracle_<kind>/<piece>/<n>.det.json for the score reader
   digits  detected heads + true digits
 Detected objects come from page_cache/musescore (run_reader_gpu.sh musescore ... first).
 Also prints, per piece, PDF heads vs score notes.
+
+usage: make_oracle.py [<list.json> <cache prefix>]   (default: test_set.json, oracle_)
+With another list (training pieces) only "both" is written, to page_cache/<prefix>both/.
 """
+import sys
 import json
 import os
 import re
@@ -39,12 +43,16 @@ def score_notes(mxl):
     return len(visible), grace, cue, len(sounding) - len(visible), fing
 
 
-tests = json.load(open(os.path.join(here, "test_set.json"), encoding="utf-8"))
+LIST = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "test_set.json")
+PREFIX = sys.argv[2] if len(sys.argv) > 2 else "oracle_"
+tests = json.load(open(LIST, encoding="utf-8"))
 total = Counter()
 for t in tests:
     name = t["name"]
     pdf = os.path.join(here, t["dir"], name + ".pdf")
     mxl = os.path.join(here, t["dir"], name + ".mxl")
+    if not os.path.exists(pdf) or not os.path.exists(mxl):
+        continue
     doc = fitz.open(pdf)
     heads, digits = {}, []
     for pi, page in enumerate(doc):
@@ -77,9 +85,12 @@ for t in tests:
         detected = json.load(open(det_path)) if os.path.exists(det_path) else []
         det_heads = [d for d in detected if d[0] >= 5]
         det_digits = [d for d in detected if d[0] < 5]
-        for kind, objs in (("heads", heads[pi] + det_digits), ("both", heads[pi] + true_digits[pi]),
-                           ("digits", det_heads + true_digits[pi])):
-            d = os.path.join(here, "page_cache", f"oracle_{kind}", name)
+        kinds = (("heads", heads[pi] + det_digits), ("both", heads[pi] + true_digits[pi]),
+                 ("digits", det_heads + true_digits[pi]))
+        if PREFIX != "oracle_":
+            kinds = kinds[1:2]
+        for kind, objs in kinds:
+            d = os.path.join(here, "page_cache", f"{PREFIX}{kind}", name)
             os.makedirs(d, exist_ok=True)
             json.dump(objs, open(os.path.join(d, f"{pi}.det.json"), "w"))
 print(dict(total))

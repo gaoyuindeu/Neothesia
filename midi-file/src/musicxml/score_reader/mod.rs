@@ -7,6 +7,7 @@
 
 pub mod align;
 mod assign;
+mod assoc;
 pub mod detect;
 mod dev;
 mod gpu;
@@ -88,16 +89,28 @@ pub struct Details {
     pub heads: HashMap<NodeId, (usize, [f32; 4])>,
     /// Every digit read: page, digit, box, the note it went to
     pub digit_boxes: Vec<(usize, u8, [f32; 4], Option<NodeId>)>,
+    /// With SCORE_READER_PAIRS: every (stack, chord) pair considered, with its features
+    pub pairs: Vec<PairOut>,
+}
+
+/// A (stack, chord) pair of a reading
+#[derive(Debug)]
+pub struct PairOut {
+    pub page: usize,
+    /// Number of the stack on its page
+    pub stack: usize,
+    /// The stack's digits, top to bottom
+    pub digits: Vec<u8>,
+    /// The chord's notes top to bottom (None: head not matched with a note)
+    pub notes: Vec<Option<NodeId>>,
+    pub features: Vec<f32>,
 }
 
 /// Fingers (note, finger), report and details of a reading
 pub type Detailed = (Vec<(NodeId, u8)>, Report, Details);
 
 /// `read`, with the details of what was matched
-pub fn read_detailed(
-    score: &str,
-    pages: &[page::Gray],
-) -> Result<Detailed, String> {
+pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, String> {
     let doc = Document::parse_with_options(
         score,
         roxmltree::ParsingOptions {
@@ -283,7 +296,9 @@ pub fn read_detailed(
     }
 
     drop_tuplet_numbers(&mut found_pages, &heads, &notes, &note_of_head);
+    drop_wedges(&mut found_pages, &heads, &notes, &note_of_head);
 
+    let dump_pairs = std::env::var_os("SCORE_READER_PAIRS").is_some();
     // Digits next to heads, page by page
     let mut fingers = Vec::new();
     let debug = std::env::var_os("SCORE_READER_DEBUG").is_some();
@@ -311,7 +326,28 @@ pub fn read_detailed(
             }
         }
         let chords = page_chords(&heads, &p.heads, p.interline);
-        let attached = attach(&p.digits, &heads, &chords, p.interline);
+        let mut pairs = Vec::new();
+        let attached = attach(
+            &p.digits,
+            &heads,
+            &chords,
+            p.interline,
+            per_system,
+            dump_pairs.then_some(&mut pairs),
+        );
+        for pair in pairs {
+            details.pairs.push(PairOut {
+                page: page_no,
+                stack: pair.id,
+                digits: pair.stack.iter().map(|&d| p.digits[d].0).collect(),
+                notes: pair
+                    .chord
+                    .iter()
+                    .map(|&h| note_of_head[h].map(|n| notes[n].node))
+                    .collect(),
+                features: pair.features.to_vec(),
+            });
+        }
         for (i, (d, r)) in p.digits.iter().enumerate() {
             let to = attached
                 .iter()
@@ -552,6 +588,50 @@ fn drop_tuplet_numbers(
     }
 }
 
+/// Digits 1 that are the staccatissimo wedge of a note of the score: in the column of its
+/// chord, close above or below the chord (the score has the wedge on one note of the chord,
+/// the page at the chord's end)
+fn drop_wedges(
+    pages: &mut [PageFound],
+    heads: &[Head],
+    notes: &[target::Note],
+    note_of_head: &[Option<usize>],
+) {
+    for p in pages.iter_mut() {
+        let il = p.interline;
+        // Vertical extent of the chord column of each wedged head
+        let columns: Vec<(f32, f32, f32)> = p
+            .heads
+            .iter()
+            .filter(|&&h| note_of_head[h].is_some_and(|n| notes[n].wedge))
+            .map(|&h| {
+                let (cx, mut top, mut bottom) =
+                    (heads[h].rect.cx(), heads[h].rect.y0, heads[h].rect.y1);
+                for &o in &p.heads {
+                    let r = heads[o].rect;
+                    if (heads[o].system, heads[o].staff) == (heads[h].system, heads[h].staff)
+                        && (r.cx() - cx).abs() < 0.75 * il
+                    {
+                        top = top.min(r.y0);
+                        bottom = bottom.max(r.y1);
+                    }
+                }
+                (cx, top, bottom)
+            })
+            .collect();
+        if columns.is_empty() {
+            continue;
+        }
+        p.digits.retain(|(d, r)| {
+            *d != 1
+                || !columns.iter().any(|&(cx, top, bottom)| {
+                    let gap = (top - r.y1).max(r.y0 - bottom);
+                    (r.cx() - cx).abs() < 0.6 * il && gap < 2.5 * il
+                })
+        });
+    }
+}
+
 /// Chords of found heads of staff `k`: systems in order, left to right
 fn found_chords(heads: &[Head], k: usize, pages: &[PageFound]) -> Vec<Vec<usize>> {
     let mut idx: Vec<usize> = (0..heads.len()).filter(|&h| heads[h].staff == k).collect();
@@ -648,11 +728,25 @@ fn page_chords(heads: &[Head], on_page: &[usize], interline: f32) -> Vec<Vec<usi
 
 /// (digit, head) pairs: stacked digits finger a chord top to bottom; a stack goes to the
 /// chord it is best aligned with; a row of single digits at one height to one staff
+/// A stack of digits and a chord it could belong to, with the features of the pair
+/// (development: written out for training the association model)
+pub struct Pair {
+    /// Number of the stack on its page
+    pub id: usize,
+    /// Digits of the stack, top to bottom (indices into the page's digits)
+    pub stack: Vec<usize>,
+    /// Heads of the chord, top to bottom
+    pub chord: Vec<usize>,
+    pub features: [f32; assoc::FEATURES],
+}
+
 fn attach(
     digits: &[(u8, Rect)],
     heads: &[Head],
     chords: &[Vec<usize>],
     il: f32,
+    per_system: usize,
+    pairs_out: Option<&mut Vec<Pair>>,
 ) -> Vec<(usize, usize)> {
     let mut links = Vec::new();
     let mut used = vec![false; heads.len()];
@@ -738,9 +832,10 @@ fn attach(
             }
             let top = heads[ch[0]].rect.y0;
             let bottom = heads[ch[ch.len() - 1]].rect.y1;
-            let (dist, above) = if scy1 < top {
+            // Above or below the chord; digits set tight to a chord may overlap its end head
+            let (dist, above) = if scy1 < top || sy1 <= top + 0.5 * il {
                 ((top - sy1).max(0.0), true)
-            } else if scy0 > bottom {
+            } else if scy0 > bottom || sy0 >= bottom - 0.5 * il {
                 ((sy0 - bottom).max(0.0), false)
             } else {
                 continue;
@@ -756,19 +851,120 @@ fn attach(
     };
     let cands: Vec<Vec<Candidate>> = stacks.iter().map(|st| candidates(st)).collect();
 
+    // Features of each (stack, candidate chord) pair
+    let stack_cx =
+        |st: &[usize]| st.iter().map(|&d| digits[d].1.cx()).sum::<f32>() / st.len() as f32;
+    let stack_cy =
+        |st: &[usize]| st.iter().map(|&d| digits[d].1.cy()).sum::<f32>() / st.len() as f32;
+    let row_of: Vec<Vec<usize>> = (0..stacks.len())
+        .map(|i| {
+            (0..stacks.len())
+                .filter(|&j| {
+                    j != i
+                        && (stack_cy(&stacks[i]) - stack_cy(&stacks[j])).abs() < 0.6 * il
+                        && (stack_cx(&stacks[i]) - stack_cx(&stacks[j])).abs() < 8.0 * il
+                })
+                .collect()
+        })
+        .collect();
+    let features = |i: usize, k: usize| -> [f32; assoc::FEATURES] {
+        let st = &stacks[i];
+        let (score, c, above, key) = cands[i][k];
+        let ch = &chords[c];
+        let hx0 = ch
+            .iter()
+            .map(|&h| heads[h].rect.x0)
+            .fold(f32::MAX, f32::min);
+        let hx1 = ch
+            .iter()
+            .map(|&h| heads[h].rect.x1)
+            .fold(f32::MIN, f32::max);
+        let (top, bottom) = (heads[ch[0]].rect.y0, heads[ch[ch.len() - 1]].rect.y1);
+        let (scx, scy) = (stack_cx(st), stack_cy(st));
+        let dist = if above {
+            top - digits[st[st.len() - 1]].1.y1
+        } else {
+            digits[st[0]].1.y0 - bottom
+        };
+        let height = st
+            .iter()
+            .map(|&d| digits[d].1.y1 - digits[d].1.y0)
+            .sum::<f32>()
+            / st.len() as f32;
+        // Bottom line of the chord's staff, from a head and its staff position
+        let h0 = &heads[ch[0]];
+        let staff_bottom = h0.rect.cy() + h0.position * il / 2.0;
+        let lower_staff = per_system >= 2 && h0.staff == per_system - 1;
+        let other_staff = cands[i].iter().filter(|o| o.3 != key).count();
+        let row = &row_of[i];
+        let agree = if row.is_empty() {
+            0.5
+        } else {
+            row.iter()
+                .filter(|&&j| cands[j].first().is_some_and(|b| b.3 == key))
+                .count() as f32
+                / row.len() as f32
+        };
+        [
+            (scx - (hx0 + hx1) / 2.0) / il,
+            (scx - (hx0 + hx1) / 2.0).abs() / il,
+            dist.max(0.0) / il,
+            above as u8 as f32,
+            st.len() as f32,
+            ch.len() as f32,
+            st.len() as f32 - ch.len() as f32,
+            k as f32,
+            cands[i].len() as f32,
+            score - cands[i][0].0,
+            height / il,
+            lower_staff as u8 as f32,
+            ((staff_bottom - scy) / (il / 2.0)).clamp(-40.0, 40.0) / 10.0,
+            h0.position / 10.0,
+            heads[ch[ch.len() - 1]].position / 10.0,
+            other_staff as f32,
+            (hx1 - hx0) / il,
+            score,
+            row.len() as f32 / 5.0,
+            agree,
+        ]
+    };
+    let feats: Vec<Vec<[f32; assoc::FEATURES]>> = (0..stacks.len())
+        .map(|i| (0..cands[i].len()).map(|k| features(i, k)).collect())
+        .collect();
+    if let Some(out) = pairs_out {
+        for (i, st) in stacks.iter().enumerate() {
+            for (k, cand) in cands[i].iter().enumerate() {
+                out.push(Pair {
+                    id: i,
+                    stack: st.clone(),
+                    chord: chords[cand.1].clone(),
+                    features: feats[i][k],
+                });
+            }
+        }
+    }
+    let model = assoc::model();
+
     // Each stack to a side (above / below) of a chord, all stacks of the page at once with the
     // least total cost: a row of digits between two staves goes to the staff whose notes no
     // other row can take. A stack can stay without a chord (cost UNASSIGNED).
-    const UNASSIGNED: f64 = 8.0;
+    // With the model: cost -ln p, a stack stays alone below probability P0
+    let p0: f64 = std::env::var("SCORE_READER_P0")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0.03);
+    let unassigned: f64 = if model.is_some() { -p0.ln() } else { 8.0 };
     const FORBIDDEN: f64 = 1e6;
     // Columns: a single note takes one digit (from above or below), a chord one stack from
     // above and one from below
     let n = stacks.len();
     let mut slot_of = Vec::with_capacity(chords.len());
     let mut slots: Vec<(usize, Option<bool>)> = Vec::new();
-    for (c, ch) in chords.iter().enumerate() {
+    let one_slot = std::env::var_os("SCORE_READER_ONE_SLOT").is_some();
+    let two_sided = |c: usize| chords[c].len() > 1 && !one_slot;
+    for c in 0..chords.len() {
         slot_of.push(slots.len());
-        if ch.len() == 1 {
+        if !two_sided(c) {
             slots.push((c, None));
         } else {
             slots.push((c, Some(true)));
@@ -779,19 +975,50 @@ fn attach(
     let cols = real + n;
     let mut cost = vec![FORBIDDEN; n * cols];
     for (i, cand) in cands.iter().enumerate() {
-        for &(score, chord, above, _) in cand {
-            let slot = slot_of[chord] + usize::from(chords[chord].len() > 1 && !above);
+        for (k, &(score, chord, above, _)) in cand.iter().enumerate() {
+            let slot = slot_of[chord] + usize::from(two_sided(chord) && !above);
             // More digits than notes: a worse fit
             let excess = stacks[i].len().saturating_sub(chords[chord].len()) as f64;
-            cost[i * cols + slot] = score as f64 + excess;
+            cost[i * cols + slot] = match model {
+                Some(m) => -(m.prob(&feats[i][k]) as f64).max(1e-4).ln(),
+                None => score as f64 + excess,
+            };
         }
-        cost[i * cols + real + i] = UNASSIGNED;
+        cost[i * cols + real + i] = unassigned;
     }
-    let choice = if n == 0 {
-        Vec::new()
-    } else {
-        assign::assign(&cost, n, cols)
-    };
+    // A chord with stacks from above and below that hold more digits than it has notes: the
+    // worse of the two is not allowed there, and the page assigned again
+    let mut choice = Vec::new();
+    for _ in 0..8 {
+        if n == 0 {
+            break;
+        }
+        choice = assign::assign(&cost, n, cols);
+        let mut on_chord: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, &slot) in choice.iter().enumerate() {
+            if slot < real && cost[i * cols + slot] < FORBIDDEN {
+                on_chord.entry(slots[slot].0).or_default().push(i);
+            }
+        }
+        let mut changed = false;
+        for (c, st) in on_chord {
+            let digits_on: usize = st.iter().map(|&i| stacks[i].len()).sum();
+            if st.len() < 2 || digits_on <= chords[c].len() {
+                continue;
+            }
+            let worst = *st
+                .iter()
+                .max_by(|&&a, &&b| {
+                    cost[a * cols + choice[a]].total_cmp(&cost[b * cols + choice[b]])
+                })
+                .unwrap();
+            cost[worst * cols + choice[worst]] = FORBIDDEN;
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
 
     for (i, st) in stacks.iter().enumerate() {
         let slot = choice[i];

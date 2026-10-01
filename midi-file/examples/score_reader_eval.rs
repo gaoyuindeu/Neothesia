@@ -295,6 +295,44 @@ fn main() {
         .unwrap();
     }
 
+    // Development: (stack, chord) pairs with their features and whether the stack's digits
+    // are the chord's fingers, as JSON lines (training data of the association model)
+    if let Some(path) = std::env::var_os("SCORE_READER_PAIRS") {
+        let mut lines = String::new();
+        for pair in &details.pairs {
+            // Each digit of the stack to a different note of the chord that has it
+            let mut used = vec![false; pair.notes.len()];
+            let matched = pair
+                .digits
+                .iter()
+                .filter(|&&d| {
+                    let hit = pair.notes.iter().enumerate().position(|(k, n)| {
+                        !used[k]
+                            && n.and_then(|n| truth_fingers.get(&n))
+                                .is_some_and(|a| a.contains(&d))
+                    });
+                    if let Some(k) = hit {
+                        used[k] = true;
+                    }
+                    hit.is_some()
+                })
+                .count();
+            let known = pair.notes.iter().any(|n| {
+                n.is_some_and(|n| truth_fingers.contains_key(&n) || !excluded.contains(&n))
+            });
+            lines.push_str(&format!(
+                "{{\"page\": {}, \"stack\": {}, \"size\": {}, \"matched\": {}, \"known\": {}, \"features\": {:?}}}
+",
+                pair.page,
+                pair.stack,
+                pair.digits.len(),
+                matched,
+                known,
+                pair.features
+            ));
+        }
+        std::fs::write(path, lines).unwrap();
+    }
     let written_n = correct + wrong + extra;
     println!(
         "{}: notes {} (heads found {}, aligned {}), fingered {} | digits read {} | written {} | correct {} wrong {} missing {} extra {} | precision {:.1}% recall {:.1}% ({:.1} s) | lost: unaligned {unaligned} no digit {no_digit} other digit {other_digit} | excluded {}",
