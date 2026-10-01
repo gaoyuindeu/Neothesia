@@ -4,11 +4,161 @@
 //! image) is read with the score reader, and the fingers written back are compared note by
 //! note with the original.
 //!
+//! The original's fingering is made one finger per note first: several fingers written on
+//! one note of a chord (one text "1\n3\n5" or several fingering elements) go to the notes
+//! sounding with it on its staff, in the only order a hand can play them (upper staff: right
+//! hand, fingers up with the pitch; lower staff: left hand, down); a group whose note count
+//! does not match is left out of the comparison. A finger change ("5-4") on a note accepts
+//! either finger.
+//!
 //! cargo run --release -p midi-file --example score_reader_eval -- <truth.mxl> <score.pdf>
+//!
+//! Development variables: SCORE_READER_LOST=<file> writes the lost fingers and the digits
+//! read as JSON (for drawing them on the page).
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use midi_file::musicxml::{note_fingerings, read_file, score_reader, strip_fingering};
+use midi_file::musicxml::{read_file, score_reader, strip_fingering};
+use roxmltree::{Document, NodeId};
+
+/// The fingering texts of a note
+fn fingering_texts(doc: &Document, note: NodeId) -> Vec<String> {
+    doc.get_node(note)
+        .unwrap()
+        .descendants()
+        .filter(|d| d.has_tag_name("fingering"))
+        .filter_map(|f| f.text().map(str::to_string))
+        .collect()
+}
+
+/// Truth of one note: the fingers accepted
+type Accepted = Vec<u8>;
+
+/// One finger (set) per note of the stripped score, from the original's fingering texts;
+/// notes in `excluded` are not compared
+fn truth_fingers(
+    truth: &Document,
+    stripped: &Document,
+) -> (HashMap<NodeId, Accepted>, HashSet<NodeId>) {
+    let elements = |d: &Document| -> Vec<NodeId> {
+        d.descendants()
+            .filter(|n| n.has_tag_name("note"))
+            .map(|n| n.id())
+            .collect()
+    };
+    let (t_notes, s_notes) = (elements(truth), elements(stripped));
+    assert_eq!(t_notes.len(), s_notes.len(), "stripping changed the notes");
+
+    // Notes sounding together on a staff, top to bottom
+    let (_, placed) = score_reader::target::notes(stripped);
+    let mut group_of: HashMap<NodeId, (usize, u64)> = HashMap::new();
+    let mut groups: HashMap<(usize, u64), Vec<(i32, NodeId)>> = HashMap::new();
+    for n in placed.iter().filter(|n| !n.grace) {
+        let key = (n.staff, (n.time * 1e6).round() as u64);
+        group_of.insert(n.node, key);
+        groups.entry(key).or_default().push((n.position, n.node));
+    }
+    for g in groups.values_mut() {
+        g.sort_by_key(|n| std::cmp::Reverse(n.0));
+    }
+
+    let mut fingers: HashMap<NodeId, Accepted> = HashMap::new();
+    let mut excluded = HashSet::new();
+    let pitch_of = |d: &Document, n: NodeId| -> String {
+        d.get_node(n)
+            .unwrap()
+            .descendants()
+            .filter(|c| {
+                c.has_tag_name("step") || c.has_tag_name("octave") || c.has_tag_name("alter")
+            })
+            .filter_map(|c| c.text())
+            .collect()
+    };
+    if std::env::var_os("SCORE_READER_CHECK").is_some() {
+        let differ = t_notes
+            .iter()
+            .zip(&s_notes)
+            .filter(|(t, s)| pitch_of(truth, **t) != pitch_of(stripped, **s))
+            .count();
+        eprintln!("notes whose pitch differs between truth and stripped: {differ}");
+    }
+    for (t, s) in t_notes.into_iter().zip(s_notes) {
+        let texts = fingering_texts(truth, t);
+        if texts.is_empty() {
+            continue;
+        }
+        let mut stack: Vec<u8> = Vec::new();
+        let mut change: Vec<u8> = Vec::new();
+        for text in &texts {
+            let digits: Vec<u8> = text
+                .chars()
+                .filter_map(|c| c.to_digit(10).map(|d| d as u8))
+                .collect();
+            // A change: digits joined by a dash, comma or tie mark
+            if digits.len() > 1 && text.contains(['-', ',', '\u{361}', '~']) {
+                change.extend(digits);
+            } else {
+                stack.extend(digits);
+            }
+        }
+        stack.retain(|d| (1..=5).contains(d));
+        change.retain(|d| (1..=5).contains(d));
+        if !change.is_empty() && stack.is_empty() {
+            fingers.insert(s, change);
+            continue;
+        }
+        if std::env::var_os("SCORE_READER_CHECK").is_some() && stack.len() > 1 {
+            let g = group_of.get(&s).and_then(|key| groups.get(key)).map(|g| {
+                g.iter()
+                    .map(|&(p, n)| (p, pitch_of(stripped, n)))
+                    .collect::<Vec<_>>()
+            });
+            eprintln!(
+                "stack {stack:?} on {} texts {texts:?} group {g:?}",
+                pitch_of(stripped, s)
+            );
+        }
+        match stack.len() {
+            0 => {}
+            1 => {
+                fingers.insert(s, stack);
+            }
+            k => {
+                // A chord's fingers written on one note: to its notes as a hand plays them
+                let group = group_of.get(&s).and_then(|key| groups.get(key));
+                match group {
+                    Some(g) if g.len() == k => {
+                        let lower_staff = stripped
+                            .get_node(s)
+                            .unwrap()
+                            .children()
+                            .find(|c| c.has_tag_name("staff"))
+                            .and_then(|c| c.text())
+                            .is_some_and(|t| t.trim() == "2");
+                        let mut sorted = stack.clone();
+                        // g is top to bottom: right hand fingers down from the top note
+                        sorted.sort_unstable_by(|a, b| b.cmp(a));
+                        if lower_staff {
+                            sorted.reverse();
+                        }
+                        for (&(_, n), &d) in g.iter().zip(&sorted) {
+                            fingers.insert(n, vec![d]);
+                        }
+                    }
+                    Some(g) => excluded.extend(g.iter().map(|&(_, n)| n)),
+                    None => {
+                        excluded.insert(s);
+                    }
+                }
+            }
+        }
+    }
+    for n in &excluded {
+        fingers.remove(n);
+    }
+    (fingers, excluded)
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -25,62 +175,143 @@ fn main() {
     if std::env::var_os("SCORE_READER_TIMING").is_some() {
         eprintln!("load {:.1?}", t.elapsed());
     }
-    let (fingers, report) = score_reader::read(&stripped, &pages).expect("read");
-    let out = score_reader::insert_fingers(&stripped, &fingers).expect("insert");
+    let (fingers, report, details) = score_reader::read_detailed(&stripped, &pages).expect("read");
     let seconds = t.elapsed().as_secs_f64();
 
-    let truth_notes = note_fingerings(&truth).unwrap();
-    let out_notes = note_fingerings(&out).unwrap();
-    assert_eq!(
-        truth_notes.len(),
-        out_notes.len(),
-        "stripping changed the notes"
-    );
-
-    if std::env::var_os("SCORE_READER_VERBOSE").is_some() {
-        eprintln!("{report:?}");
-        for (i, (t, o)) in truth_notes.iter().zip(&out_notes).enumerate() {
-            if t.1 != o.1 {
-                eprintln!("note {i}: pitch {} truth {:?} got {:?}", t.0, t.1, o.1);
-            }
-        }
-    }
+    let opts = || roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let truth_doc = Document::parse_with_options(&truth, opts()).unwrap();
+    let stripped_doc = Document::parse_with_options(&stripped, opts()).unwrap();
+    let (truth_fingers, excluded) = truth_fingers(&truth_doc, &stripped_doc);
+    let written: HashMap<NodeId, u8> = fingers.iter().copied().collect();
+    let notes = stripped_doc
+        .descendants()
+        .filter(|n| n.has_tag_name("note"))
+        .count();
 
     let (mut fingered, mut correct, mut wrong, mut missing, mut extra) = (0, 0, 0, 0, 0);
-    for ((_, t), (_, o)) in truth_notes.iter().zip(&out_notes) {
-        match (t, o) {
-            (Some(t), Some(o)) if t == o => {
-                fingered += 1;
-                correct += 1;
-            }
-            (Some(_), Some(_)) => {
-                fingered += 1;
-                wrong += 1;
-            }
-            (Some(_), None) => {
-                fingered += 1;
-                missing += 1;
-            }
-            (None, Some(_)) => extra += 1,
-            (None, None) => {}
+    // Why fingers were missed or wrong: the note not matched with a head, matched but no
+    // digit given to it, or another digit given
+    let (mut unaligned, mut no_digit, mut other_digit) = (0, 0, 0);
+    let mut lost = Vec::new();
+    let head_json = |n: &NodeId| {
+        details
+            .heads
+            .get(n)
+            .map_or("null".to_string(), |(p, b)| format!("[{p}, {b:?}]"))
+    };
+    for note in stripped_doc
+        .descendants()
+        .filter(|n| n.has_tag_name("note"))
+    {
+        let n = note.id();
+        if excluded.contains(&n) {
+            continue;
         }
+        let got = written.get(&n).copied();
+        let Some(accepted) = truth_fingers.get(&n) else {
+            if let Some(d) = got {
+                extra += 1;
+                lost.push(format!(
+                    r#"{{"kind": "extra", "finger": {d}, "head": {}}}"#,
+                    head_json(&n)
+                ));
+            }
+            continue;
+        };
+        fingered += 1;
+        match got {
+            Some(d) if accepted.contains(&d) => {
+                correct += 1;
+                continue;
+            }
+            Some(_) => wrong += 1,
+            None => missing += 1,
+        }
+        let kind = if !details.aligned.contains(&n) {
+            unaligned += 1;
+            "unaligned"
+        } else {
+            match details.digits.get(&n) {
+                Some(d) if !accepted.contains(d) => {
+                    other_digit += 1;
+                    "other digit"
+                }
+                _ => {
+                    no_digit += 1;
+                    "no digit"
+                }
+            }
+        };
+        let pitch = note
+            .descendants()
+            .find(|d| d.has_tag_name("pitch"))
+            .map(|p| {
+                let t = |name: &str| {
+                    p.children()
+                        .find(|c| c.has_tag_name(name))
+                        .and_then(|c| c.text())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                format!("{}{}{}", t("step"), t("alter"), t("octave"))
+            })
+            .unwrap_or_default();
+        lost.push(format!(
+            r#"{{"kind": "{kind}", "finger": {}, "pitch": "{pitch}", "measure": "{}", "head": {}}}"#,
+            accepted[0],
+            note.ancestors()
+                .find(|a| a.has_tag_name("measure"))
+                .and_then(|m| m.attribute("number"))
+                .unwrap_or(""),
+            head_json(&n)
+        ));
     }
-    let written = correct + wrong + extra;
+
+    if let Some(path) = std::env::var_os("SCORE_READER_LOST") {
+        let digits: Vec<String> = details
+            .digit_boxes
+            .iter()
+            .map(|(p, d, b, to)| {
+                let head = to
+                    .and_then(|n| details.heads.get(&n))
+                    .map_or("null".to_string(), |(_, h)| format!("{h:?}"));
+                format!(
+                    r#"{{"page": {p}, "digit": {d}, "box": {b:?}, "attached": {}, "to": {head}}}"#,
+                    to.is_some()
+                )
+            })
+            .collect();
+        std::fs::write(
+            path,
+            format!(
+                "{{\"lost\": [{}], \"digits\": [{}]}}",
+                lost.join(","),
+                digits.join(",")
+            ),
+        )
+        .unwrap();
+    }
+
+    let written_n = correct + wrong + extra;
     println!(
-        "{}: notes {} (heads found {}, aligned {}), fingered {} | digits read {} | written {} | correct {} wrong {} missing {} extra {} | precision {:.1}% recall {:.1}% ({:.1} s)",
+        "{}: notes {} (heads found {}, aligned {}), fingered {} | digits read {} | written {} | correct {} wrong {} missing {} extra {} | precision {:.1}% recall {:.1}% ({:.1} s) | lost: unaligned {unaligned} no digit {no_digit} other digit {other_digit} | excluded {}",
         truth_path.file_name().unwrap().to_string_lossy(),
-        truth_notes.len(),
+        notes,
         report.heads,
         report.aligned,
         fingered,
         report.digits,
-        written,
+        written_n,
         correct,
         wrong,
         missing,
         extra,
-        100.0 * correct as f64 / written.max(1) as f64,
+        100.0 * correct as f64 / written_n.max(1) as f64,
         100.0 * correct as f64 / fingered.max(1) as f64,
-        seconds
+        seconds,
+        excluded.len()
     );
 }

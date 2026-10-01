@@ -14,6 +14,8 @@ pub struct Note {
     pub position: i32,
     pub node: NodeId,
     pub has_fingering: bool,
+    /// The tuplet the note is in (an id over the score) and the number printed for it, if any
+    pub tuplet: Option<(usize, Option<u8>)>,
 }
 
 fn child<'a, 'i>(node: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
@@ -54,6 +56,7 @@ fn bottom_line(sign: &str, line: i32, octave_change: i32) -> i32 {
 pub fn notes(doc: &Document) -> (usize, Vec<Note>) {
     let mut out = Vec::new();
     let mut staff_base = 0;
+    let mut tuplets = 0usize;
     for part in doc
         .root_element()
         .children()
@@ -65,6 +68,8 @@ pub fn notes(doc: &Document) -> (usize, Vec<Note>) {
         let mut bottom = [30i32; 8];
         let mut shift = [0i32; 8];
         let mut measure_start = 0.0f64;
+        // Open tuplet of each voice: id, number printed
+        let mut open: std::collections::HashMap<String, (usize, Option<u8>)> = Default::default();
         for measure in part.children().filter(|c| c.has_tag_name("measure")) {
             let mut pos = 0.0f64;
             let mut last_onset = 0.0f64;
@@ -149,6 +154,27 @@ pub fn notes(doc: &Document) -> (usize, Vec<Note>) {
                             pos += duration;
                             longest = longest.max(pos);
                         }
+                        let voice = text(el, "voice").unwrap_or("1").to_string();
+                        let marks: Vec<_> = el
+                            .descendants()
+                            .filter(|d| d.has_tag_name("tuplet"))
+                            .collect();
+                        if marks.iter().any(|t| t.attribute("type") == Some("start")) {
+                            let start = marks
+                                .iter()
+                                .find(|t| t.attribute("type") == Some("start"))
+                                .unwrap();
+                            let number = child(el, "time-modification")
+                                .and_then(|tm| text(tm, "actual-notes"))
+                                .and_then(|n| n.parse::<u8>().ok())
+                                .filter(|_| start.attribute("show-number") != Some("none"));
+                            tuplets += 1;
+                            open.insert(voice.clone(), (tuplets, number));
+                        }
+                        let tuplet = open.get(&voice).copied();
+                        if marks.iter().any(|t| t.attribute("type") == Some("stop")) {
+                            open.remove(&voice);
+                        }
                         // Not printed: no head to find
                         if el.attribute("print-object") == Some("no") || child(el, "cue").is_some()
                         {
@@ -179,6 +205,7 @@ pub fn notes(doc: &Document) -> (usize, Vec<Note>) {
                             position: written - bottom[n],
                             node: el.id(),
                             has_fingering,
+                            tuplet,
                         });
                     }
                     _ => {}

@@ -25,7 +25,10 @@ import fitz
 here = os.path.dirname(os.path.abspath(__file__))
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)
-held_out = {os.path.basename(p.rstrip("/\\"))[:3] for p in glob.glob(os.path.join(here, "omr_work", "*", ""))}
+# Evaluation pieces (make_test_set.py) never go into training
+held_out = {p["name"] for p in json.load(open(os.path.join(here, "test_set_all.json"), encoding="utf-8"))}
+# Scores labelled "Piano" in PDMX that are other instruments (screen_piano.py, checked by eye)
+held_out |= set(json.load(open(os.path.join(here, "non_piano.json"), encoding="utf-8")))
 print("held out:", sorted(held_out), file=sys.stderr)
 
 DPI = 300
@@ -35,7 +38,7 @@ stats = Counter()
 for mxl in sorted(glob.glob(os.path.join(here, "fingered", "*.mxl")) + glob.glob(os.path.join(here, "fingered15", "*.mxl"))):
     name = os.path.basename(mxl)[:-4]
     pdf = mxl[:-4] + ".pdf"
-    if name[:3] in held_out or not os.path.exists(pdf):
+    if name in held_out or not os.path.exists(pdf):
         stats["skipped"] += 1
         continue
     z = zipfile.ZipFile(mxl)

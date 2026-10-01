@@ -7,9 +7,13 @@ import fitz
 
 here = os.path.dirname(os.path.abspath(__file__))
 items = []
+# Scores labelled "Piano" in PDMX that are other instruments: left out
+non_piano = {n.split("_")[0] for n in json.load(open(os.path.join(here, "non_piano.json"), encoding="utf-8"))}
 
 pdmx = json.load(open(os.path.join(here, "train_pages3", "labels2.json")))
 for image, lab in pdmx.items():
+    if image.rsplit("_p", 1)[0] in non_piano:
+        continue
     objects = [[d - 1, x0, y0, x1, y1] for d, x0, y0, x1, y1 in lab["digits"]]
     objects += [[5 + k, x0, y0, x1, y1] for k, x0, y0, x1, y1 in lab["heads"]]
     items.append({"image": os.path.join(here, "train_pages3", image), "piece": image.split("_")[0], "objects": objects})
@@ -20,6 +24,8 @@ os.makedirs(os.path.join(vdir, "pages"), exist_ok=True)
 docs = {}
 for key, lab in vlab.items():
     name, page = key.rsplit("_p", 1)
+    if name.split("_")[0] in non_piano:
+        continue
     doc = docs.setdefault(name, fitz.open(os.path.join(vdir, name + ".pdf")))
     if int(page) >= len(doc):
         continue

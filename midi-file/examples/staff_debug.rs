@@ -18,10 +18,15 @@ fn main() {
             continue;
         };
         let found = staves::find(&bits, interline, thickness);
-        let systems = staves::systems(&found, 2);
-        for st in found.iter().take(2) {
-            println!("  staff lines {:?} x {}..{}", st.lines, st.x0, st.x1);
+        let systems = staves::systems(&bits, &found, 2);
+        for (i, st) in found.iter().enumerate() {
+            let joined = i + 1 < found.len() && staves::joined(&bits, st, &found[i + 1]);
+            println!(
+                "  staff {i} lines {:?} x {}..{} joined to next {joined}",
+                st.lines, st.x0, st.x1
+            );
         }
+        println!("  systems {systems:?}");
         println!(
             "page {n}: {}x{} skew {angle:.1} interline {interline} thickness {thickness}: {} staves, {} systems ({:.1} s)",
             gray.w,

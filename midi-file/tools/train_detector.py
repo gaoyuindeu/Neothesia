@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 INDEX, OUT = sys.argv[1], sys.argv[2]
 STEPS = int(sys.argv[3]) if len(sys.argv) > 3 else 30000
@@ -32,6 +32,38 @@ ARCH = os.environ.get("ARCH", "full")
 STRIDE = 4 if ARCH == "fast" else 2
 NCLS = 8
 PASTE = float(os.environ.get("PASTE", "0.5"))
+# Digits drawn in other fonts next to note heads: fingering of other engravers (italic,
+# bold, sans), which the PDMX pages (mostly MuseScore's default font) rarely show
+SYNTH = float(os.environ.get("SYNTH", "0.5"))
+FONT_FILES = [os.path.join(os.environ.get("FONTS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")), f) for f in (
+    "DejaVuSans.ttf", "DejaVuSans-Oblique.ttf", "DejaVuSerif.ttf", "DejaVuSerif-Italic.ttf",
+    "Edwin-Roman.otf", "Edwin-Italic.otf", "FreeSans.otf", "FreeSansOblique.otf", "FreeSerif.otf",
+    "FreeSerifItalic.otf")] + [os.path.join("C:/Windows/Fonts", f) for f in (
+    "times.ttf", "timesi.ttf", "timesbd.ttf", "timesbi.ttf", "georgia.ttf", "georgiai.ttf",
+    "georgiab.ttf", "pala.ttf", "palai.ttf", "palab.ttf", "palabi.ttf", "BKANT.TTF",
+    "cambriai.ttf", "cambriab.ttf", "arial.ttf", "ariali.ttf", "arialbd.ttf", "calibri.ttf",
+    "calibrii.ttf", "segoeui.ttf", "segoeuii.ttf", "constan.ttf", "constani.ttf", "CENTURY.TTF",
+    "verdana.ttf", "verdanai.ttf", "trebuc.ttf", "trebucit.ttf", "tahoma.ttf")]
+FONT_FILES = [f for f in FONT_FILES if os.path.exists(f)]
+_fonts = {}
+
+
+def digit_patch(rng, digit, height):
+    """Digit `digit` (1-5) in a random font, its ink about `height` px tall (gray patch)"""
+    path = rng.choice(FONT_FILES)
+    size = max(6, int(height * 1.45))
+    key = (path, size)
+    if key not in _fonts:
+        if len(_fonts) > 400:
+            _fonts.clear()
+        _fonts[key] = ImageFont.truetype(path, size)
+    canvas = Image.new("L", (size * 3, size * 3), 255)
+    ImageDraw.Draw(canvas).text((size, size // 2), str(digit), font=_fonts[key], fill=0)
+    a = np.asarray(canvas)
+    ys, xs = np.nonzero(a < 160)
+    if len(xs) == 0:
+        return None
+    return a[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
 os.makedirs(OUT, exist_ok=True)
 
 
@@ -87,6 +119,41 @@ class Pages(torch.utils.data.Dataset):
                 px, py = rng.randrange(0, size - pw), rng.randrange(0, size - ph)
                 nb = [c, left + px, top + py, left + px + pw - 1, top + py + ph - 1]
                 if any(nb[1] <= b[3] + 4 and b[1] <= nb[3] + 4 and nb[2] <= b[4] + 4 and b[2] <= nb[4] + 4 for b in objects):
+                    continue
+                a0[py:py + ph, px:px + pw] = np.minimum(a0[py:py + ph, px:px + pw], patch)
+                objects.append(nb)
+            im = Image.fromarray(a0)
+        # Synthetic digits in other fonts above, below or left of heads (touching them at times)
+        near = [h for h in heads if left <= h[1] and h[3] < left + size and top <= h[2] and h[4] < top + size]
+        if near and FONT_FILES and rng.random() < SYNTH:
+            a0 = np.asarray(im).copy()
+            for _ in range(rng.randint(1, 6)):
+                _, hx0, hy0, hx1, hy1 = rng.choice(near)
+                il = max((hx1 - hx0) / 1.25, 8.0)
+                digit = rng.randint(1, 5)
+                patch = digit_patch(rng, digit, rng.uniform(0.75, 1.5) * il)
+                if patch is None:
+                    continue
+                ph, pw = patch.shape
+                hcx, hcy = (hx0 + hx1) / 2, (hy0 + hy1) / 2
+                side = rng.random()
+                if side < 0.4:      # above
+                    x = hcx - pw / 2 + rng.uniform(-0.35, 0.35) * il
+                    y = hy0 - rng.uniform(0.0, 1.6) * il - ph
+                elif side < 0.8:    # below
+                    x = hcx - pw / 2 + rng.uniform(-0.35, 0.35) * il
+                    y = hy1 + rng.uniform(0.0, 1.6) * il
+                else:               # left of the head
+                    x = hx0 - rng.uniform(0.05, 0.5) * il - pw
+                    y = hcy - ph / 2 + rng.uniform(-0.2, 0.2) * il
+                px, py = int(x) - left, int(y) - top
+                if px < 0 or py < 0 or px + pw >= size or py + ph >= size:
+                    continue
+                pad_t, pad_b = int(0.15 * ph), int(0.2 * ph)
+                nb = [digit - 1, left + px, top + py - pad_t, left + px + pw - 1, top + py + ph - 1 + pad_b]
+                # Not over another digit or head
+                if any(nb[1] <= b[3] and b[1] <= nb[3] and nb[2] + pad_t <= b[4] and b[2] <= nb[4] - pad_b
+                       for b in objects):
                     continue
                 a0[py:py + ph, px:px + pw] = np.minimum(a0[py:py + ph, px:px + pw], patch)
                 objects.append(nb)

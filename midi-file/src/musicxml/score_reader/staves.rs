@@ -80,16 +80,25 @@ pub fn find(page: &Bitmap, interline: f32, thickness: f32) -> Vec<Staff> {
     if peak == 0 {
         return Vec::new();
     }
-    // Line candidates: runs of rows with enough long ink
+    // Line candidates: rows with enough long ink that are the strongest around them (a beam
+    // lying on a staff line makes a thick band; its line is the strongest rows of the band,
+    // the rest of the band another candidate)
     let limit = (peak as f32 * 0.3) as usize;
+    let reach = thickness as usize + 1;
+    let strong = |y: usize| {
+        let lo = y.saturating_sub(reach);
+        let hi = (y + reach).min(page.h - 1);
+        let max = rows[lo..=hi].iter().copied().max().unwrap_or(0);
+        rows[y] >= limit && rows[y] as f32 >= 0.8 * max as f32
+    };
     let mut lines: Vec<(f32, usize)> = Vec::new(); // (center row, ink)
     let mut y = 0;
     while y < page.h {
-        if rows[y] >= limit {
+        if strong(y) {
             let start = y;
             let mut ink = 0;
             let mut weighted = 0.0;
-            while y < page.h && rows[y] >= limit && y - start <= (3.0 * thickness) as usize + 2 {
+            while y < page.h && strong(y) && y - start <= (3.0 * thickness) as usize + 2 {
                 ink += rows[y];
                 weighted += y as f32 * rows[y] as f32;
                 y += 1;
@@ -100,29 +109,90 @@ pub fn find(page: &Bitmap, interline: f32, thickness: f32) -> Vec<Staff> {
         }
     }
 
-    // Five lines evenly spaced at about the interline
-    let mut staves = Vec::new();
-    let mut i = 0;
-    while i + 5 <= lines.len() {
-        let ys: Vec<f32> = lines[i..i + 5].iter().map(|l| l.0).collect();
-        let gaps: Vec<f32> = ys.windows(2).map(|w| w[1] - w[0]).collect();
-        let ok = gaps
-            .iter()
-            .all(|&g| (0.75 * interline..=1.3 * interline).contains(&g));
-        if ok {
-            let row = ys[2].round() as usize;
-            let (x0, x1) = extent(page, row, interline);
-            staves.push(Staff {
-                lines: [ys[0], ys[1], ys[2], ys[3], ys[4]],
-                x0,
-                x1,
-            });
-            i += 5;
-        } else {
-            i += 1;
+    // Five lines evenly spaced at about the interline. Other long strokes (beams inside the
+    // staff, ledger lines, hairpins) can sit between them: from each candidate as the top
+    // line, the candidates nearest to where the next lines should be
+    let tolerance = (0.2 * interline).max(2.0);
+    let mut options: Vec<([usize; 5], f32)> = Vec::new();
+    for top in 0..lines.len() {
+        let mut picked = [top; 5];
+        let mut gap = interline;
+        let mut ok = true;
+        for k in 1..5 {
+            let want = lines[picked[k - 1]].0 + gap;
+            let Some(next) = (picked[k - 1] + 1..lines.len())
+                .take_while(|&c| lines[c].0 <= want + tolerance)
+                .filter(|&c| (lines[c].0 - want).abs() <= tolerance)
+                .min_by(|&a, &b| {
+                    (lines[a].0 - want)
+                        .abs()
+                        .total_cmp(&(lines[b].0 - want).abs())
+                })
+            else {
+                ok = false;
+                break;
+            };
+            picked[k] = next;
+            if k == 1 {
+                gap = lines[next].0 - lines[top].0;
+                if !(0.75 * interline..=1.3 * interline).contains(&gap) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        // Staff lines are about equally long; a beam taken for a line is shorter
+        let inks: Vec<usize> = picked.iter().map(|&c| lines[c].1).collect();
+        let (lo, hi) = (*inks.iter().min().unwrap(), *inks.iter().max().unwrap());
+        if (lo as f32) < 0.15 * hi as f32 {
+            continue;
+        }
+        options.push((picked, inks.iter().sum::<usize>() as f32));
+    }
+    // Strongest staves first, no two sharing a line or overlapping
+    options.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut taken: Vec<[usize; 5]> = Vec::new();
+    for (picked, _) in options {
+        let (top, bottom) = (lines[picked[0]].0, lines[picked[4]].0);
+        let clash = taken.iter().any(|t| {
+            let (t0, t4) = (lines[t[0]].0, lines[t[4]].0);
+            top <= t4 && bottom >= t0
+        });
+        if !clash {
+            taken.push(picked);
         }
     }
-    staves
+    taken.sort_by(|a, b| lines[a[0]].0.total_cmp(&lines[b[0]].0));
+    taken
+        .into_iter()
+        .map(|picked| {
+            let ys = picked.map(|c| lines[c].0);
+            let (x0, x1) = extent(page, ys[2].round() as usize, interline);
+            Staff { lines: ys, x0, x1 }
+        })
+        .collect()
+}
+
+/// Whether two staves (`a` above `b`) are joined by a vertical line at their left end: the
+/// barline or bracket that starts a system
+pub fn joined(page: &Bitmap, a: &Staff, b: &Staff) -> bool {
+    let (y0, y1) = (a.lines[4].round() as usize, b.lines[0].round() as usize);
+    if y1 <= y0 + 1 || y1 >= page.h {
+        return false;
+    }
+    // Near the left end of either staff (an end can be off: a box or a label touching the
+    // lines lengthens it)
+    let reach = (a.spacing() * 4.0) as usize;
+    let near = |x0: usize| x0.saturating_sub(reach)..=(x0 + reach).min(page.w - 1);
+    near(a.x0).chain(near(b.x0)).any(|x| {
+        let ink = (y0..=y1)
+            .filter(|&y| (x.saturating_sub(1)..=(x + 1).min(page.w - 1)).any(|xx| page.get(xx, y)))
+            .count();
+        ink as f32 >= 0.95 * (y1 - y0 + 1) as f32
+    })
 }
 
 /// Left and right end of the line through `row` (gaps shorter than two spaces bridged)
@@ -156,31 +226,30 @@ fn extent(page: &Bitmap, row: usize, interline: f32) -> (usize, usize) {
     best
 }
 
-/// Staves grouped into systems of `per_system` staves (piano: 2), by the gaps between them:
-/// staves of a system are closer to each other than to the next system
-pub fn systems(staves: &[Staff], per_system: usize) -> Vec<Vec<usize>> {
+/// Staves grouped into systems of `per_system` staves (piano: 2): in order when they make
+/// full systems, else by the line joining the staves of a system at their left end, else by
+/// the gaps between them (staves of a system are closer to each other than to the next one)
+pub fn systems(page: &Bitmap, staves: &[Staff], per_system: usize) -> Vec<Vec<usize>> {
     if per_system <= 1 || staves.len() < per_system {
         return (0..staves.len()).map(|i| vec![i]).collect();
     }
-    if staves.len().is_multiple_of(per_system) {
-        // The usual case; check that the grouping puts the big gaps between systems
-        let gaps: Vec<f32> = staves
-            .windows(2)
-            .map(|w| w[1].lines[0] - w[0].lines[4])
-            .collect();
-        let inner: f32 = (0..gaps.len())
-            .filter(|i| (i + 1) % per_system != 0)
-            .map(|i| gaps[i])
-            .fold(0.0, f32::max);
-        let outer: f32 = (0..gaps.len())
-            .filter(|i| (i + 1) % per_system == 0)
-            .map(|i| gaps[i])
-            .fold(f32::MAX, f32::min);
-        if gaps.len() < per_system || inner <= outer * 1.05 {
-            return (0..staves.len() / per_system)
-                .map(|s| (s * per_system..(s + 1) * per_system).collect())
-                .collect();
+    let mut joined_groups: Vec<Vec<usize>> = vec![vec![0]];
+    for i in 1..staves.len() {
+        if joined(page, &staves[i - 1], &staves[i]) {
+            joined_groups.last_mut().unwrap().push(i);
+        } else {
+            joined_groups.push(vec![i]);
         }
+    }
+    if joined_groups.iter().all(|g| g.len() == per_system) {
+        return joined_groups;
+    }
+    if staves.len().is_multiple_of(per_system) {
+        // The usual case: the only grouping into full systems of consecutive staves (gaps
+        // can mislead: a system spread for notes between its staves)
+        return (0..staves.len() / per_system)
+            .map(|s| (s * per_system..(s + 1) * per_system).collect())
+            .collect();
     }
     // Otherwise split at the largest gaps
     let gaps: Vec<(usize, f32)> = staves

@@ -6,6 +6,7 @@
 //! staff positions, and the digits next to the heads give the notes their fingers.
 
 pub mod align;
+mod assign;
 pub mod detect;
 mod dev;
 mod gpu;
@@ -74,6 +75,29 @@ const CHORD_DX: f32 = 0.75;
 
 /// Fingers for notes of the score (`(note element, finger)`), read from the pages
 pub fn read(score: &str, pages: &[page::Gray]) -> Result<(Vec<(NodeId, u8)>, Report), String> {
+    read_detailed(score, pages).map(|(fingers, report, _)| (fingers, report))
+}
+
+/// Development: which notes of the score a reading matched with a head, and the digits it
+/// gave to notes (also notes that already had fingering)
+#[derive(Debug, Default)]
+pub struct Details {
+    pub aligned: std::collections::HashSet<NodeId>,
+    pub digits: HashMap<NodeId, u8>,
+    /// Page and box (x0, y0, x1, y1) of the head matched with each note
+    pub heads: HashMap<NodeId, (usize, [f32; 4])>,
+    /// Every digit read: page, digit, box, the note it went to
+    pub digit_boxes: Vec<(usize, u8, [f32; 4], Option<NodeId>)>,
+}
+
+/// Fingers (note, finger), report and details of a reading
+pub type Detailed = (Vec<(NodeId, u8)>, Report, Details);
+
+/// `read`, with the details of what was matched
+pub fn read_detailed(
+    score: &str,
+    pages: &[page::Gray],
+) -> Result<Detailed, String> {
     let doc = Document::parse_with_options(
         score,
         roxmltree::ParsingOptions {
@@ -116,7 +140,7 @@ pub fn read(score: &str, pages: &[page::Gray]) -> Result<(Vec<(NodeId, u8)>, Rep
         let found_staves = staves::find(&bits, interline, thickness);
         times[2] += t.elapsed();
         report.staves += found_staves.len();
-        let systems = staves::systems(&found_staves, per_system);
+        let systems = staves::systems(&bits, &found_staves, per_system);
         // staff index on the page -> (system, staff in system)
         let mut place = HashMap::new();
         for (s, system) in systems.iter().enumerate() {
@@ -211,7 +235,20 @@ pub fn read(score: &str, pages: &[page::Gray]) -> Result<(Vec<(NodeId, u8)>, Rep
             .iter()
             .map(|c| c.iter().map(|&n| notes[n].position).collect())
             .collect();
-        for (i, j) in align::align(&found_pos, &written_pos) {
+        let pairs = align::align(&found_pos, &written_pos);
+        if std::env::var_os("SCORE_READER_ALIGN_DEBUG").is_some() {
+            debug_alignment(
+                k,
+                &heads,
+                &found,
+                &found_pos,
+                &notes,
+                &written,
+                &written_pos,
+                &pairs,
+            );
+        }
+        for (i, j) in pairs {
             if align::chord_similarity(&found_pos[i], &written_pos[j]) < 0.5 {
                 continue;
             }
@@ -226,6 +263,26 @@ pub fn read(score: &str, pages: &[page::Gray]) -> Result<(Vec<(NodeId, u8)>, Rep
         }
     }
     report.aligned = note_of_head.iter().filter(|n| n.is_some()).count();
+    let mut details = Details {
+        aligned: note_of_head
+            .iter()
+            .flatten()
+            .map(|&n| notes[n].node)
+            .collect(),
+        ..Default::default()
+    };
+    for (page_no, p) in found_pages.iter().enumerate() {
+        for &h in &p.heads {
+            if let Some(n) = note_of_head[h] {
+                let r = heads[h].rect;
+                details
+                    .heads
+                    .insert(notes[n].node, (page_no, [r.x0, r.y0, r.x1, r.y1]));
+            }
+        }
+    }
+
+    drop_tuplet_numbers(&mut found_pages, &heads, &notes, &note_of_head);
 
     // Digits next to heads, page by page
     let mut fingers = Vec::new();
@@ -254,10 +311,25 @@ pub fn read(score: &str, pages: &[page::Gray]) -> Result<(Vec<(NodeId, u8)>, Rep
             }
         }
         let chords = page_chords(&heads, &p.heads, p.interline);
-        for (digit, head) in attach(&p.digits, &heads, &chords, p.interline) {
+        let attached = attach(&p.digits, &heads, &chords, p.interline);
+        for (i, (d, r)) in p.digits.iter().enumerate() {
+            let to = attached
+                .iter()
+                .find(|a| a.0 == i)
+                .and_then(|a| note_of_head[a.1])
+                .map(|n| notes[n].node);
+            details
+                .digit_boxes
+                .push((page_no, *d, [r.x0, r.y0, r.x1, r.y1], to));
+        }
+        for (digit, head) in attached {
             report.attached += 1;
             if let Some(n) = note_of_head[head] {
                 fingers.push((notes[n].node, p.digits[digit].0, notes[n].has_fingering));
+                details
+                    .digits
+                    .entry(notes[n].node)
+                    .or_insert(p.digits[digit].0);
             }
         }
     }
@@ -272,7 +344,7 @@ pub fn read(score: &str, pages: &[page::Gray]) -> Result<(Vec<(NodeId, u8)>, Rep
     if timing {
         eprintln!("align and attach {:.1?}", t.elapsed());
     }
-    Ok((fingers, report))
+    Ok((fingers, report, details))
 }
 
 /// The box of the ink inside a predicted box: detection boxes come from text boxes, taller
@@ -367,6 +439,117 @@ fn drop_numbers(
         i += 1;
         keep[i - 1]
     });
+}
+
+/// Development: the alignment of one staff, found chord by written chord ("=" paired, "-"
+/// found only, "+" written only), with system / x and written time
+#[allow(clippy::too_many_arguments)]
+fn debug_alignment(
+    k: usize,
+    heads: &[Head],
+    found: &[Vec<usize>],
+    found_pos: &[Vec<f32>],
+    notes: &[target::Note],
+    written: &[Vec<usize>],
+    written_pos: &[Vec<i32>],
+    pairs: &[(usize, usize)],
+) {
+    let f = |i: usize| {
+        let h = &heads[found[i][0]];
+        let pos: Vec<String> = found_pos[i].iter().map(|p| format!("{p:.1}")).collect();
+        format!("s{} x{:.0} [{}]", h.system, h.rect.cx(), pos.join(" "))
+    };
+    let w = |j: usize| {
+        let n = &notes[written[j][0]];
+        format!(
+            "t{:.3}{} {:?}",
+            n.time,
+            if n.grace { "g" } else { "" },
+            written_pos[j]
+        )
+    };
+    let (mut i, mut j) = (0, 0);
+    for &(pi, pj) in pairs
+        .iter()
+        .chain(std::iter::once(&(found.len(), written.len())))
+    {
+        while i < pi {
+            eprintln!("A{k} - {}", f(i));
+            i += 1;
+        }
+        while j < pj {
+            eprintln!("A{k} + {}", w(j));
+            j += 1;
+        }
+        if pi < found.len() && pj < written.len() {
+            let s = align::chord_similarity(&found_pos[pi], &written_pos[pj]);
+            eprintln!("A{k} = {} | {} sim {s:.2}", f(pi), w(pj));
+            i += 1;
+            j += 1;
+        }
+    }
+}
+
+/// Digits that are the number of a tuplet of the score: its number, over the middle of its
+/// notes, away from their heads (beyond the stems or the bracket; fingering is close to the
+/// notes)
+fn drop_tuplet_numbers(
+    pages: &mut [PageFound],
+    heads: &[Head],
+    notes: &[target::Note],
+    note_of_head: &[Option<usize>],
+) {
+    // Heads of each printed tuplet number
+    let mut groups: HashMap<usize, (u8, Vec<usize>)> = HashMap::new();
+    for (h, n) in note_of_head.iter().enumerate() {
+        if let Some(n) = n
+            && let Some((id, Some(number))) = notes[*n].tuplet
+        {
+            groups.entry(id).or_insert((number, Vec::new())).1.push(h);
+        }
+    }
+    for p in pages.iter_mut() {
+        let il = p.interline;
+        let on_page: std::collections::HashSet<usize> = p.heads.iter().copied().collect();
+        let mut drop = vec![false; p.digits.len()];
+        for (number, hs) in groups.values() {
+            if !hs.iter().all(|h| on_page.contains(h)) || hs.is_empty() {
+                continue;
+            }
+            let x0 = hs
+                .iter()
+                .map(|&h| heads[h].rect.x0)
+                .fold(f32::MAX, f32::min);
+            let x1 = hs
+                .iter()
+                .map(|&h| heads[h].rect.x1)
+                .fold(f32::MIN, f32::max);
+            let top = hs
+                .iter()
+                .map(|&h| heads[h].rect.y0)
+                .fold(f32::MAX, f32::min);
+            let bottom = hs
+                .iter()
+                .map(|&h| heads[h].rect.y1)
+                .fold(f32::MIN, f32::max);
+            let cx = (x0 + x1) / 2.0;
+            for (i, (d, r)) in p.digits.iter().enumerate() {
+                if d != number || (r.cx() - cx).abs() > 0.6 * il + 0.1 * (x1 - x0) {
+                    continue;
+                }
+                let above = (top - r.y1) >= 1.8 * il && (top - r.y1) <= 7.0 * il;
+                let below = (r.y0 - bottom) >= 1.8 * il && (r.y0 - bottom) <= 7.0 * il;
+                if above || below {
+                    drop[i] = true;
+                }
+            }
+        }
+        let mut i = 0;
+        p.digits.retain(|_| {
+            i += 1;
+            !drop[i - 1]
+        });
+    }
 }
 
 /// Chords of found heads of staff `k`: systems in order, left to right
@@ -573,57 +756,51 @@ fn attach(
     };
     let cands: Vec<Vec<Candidate>> = stacks.iter().map(|st| candidates(st)).collect();
 
-    // Rows of single digits vote for one staff
-    let mut singles: Vec<usize> = (0..stacks.len())
-        .filter(|&i| stacks[i].len() == 1 && !cands[i].is_empty())
-        .collect();
-    singles.sort_by(|&a, &b| {
-        digits[stacks[a][0]]
-            .1
-            .y0
-            .total_cmp(&digits[stacks[b][0]].1.y0)
-    });
-    let mut rows: Vec<Vec<usize>> = Vec::new();
-    for i in singles {
-        let d = digits[stacks[i][0]].1;
-        let row = rows.iter_mut().find(|row| {
-            let r = digits[stacks[*row.last().unwrap()][0]].1;
-            (d.y0 - r.y0).abs() < 0.6 * il && (d.x0 - r.x0).abs() < 6.0 * il
-        });
-        match row {
-            Some(row) => row.push(i),
-            None => rows.push(vec![i]),
+    // Each stack to a side (above / below) of a chord, all stacks of the page at once with the
+    // least total cost: a row of digits between two staves goes to the staff whose notes no
+    // other row can take. A stack can stay without a chord (cost UNASSIGNED).
+    const UNASSIGNED: f64 = 8.0;
+    const FORBIDDEN: f64 = 1e6;
+    // Columns: a single note takes one digit (from above or below), a chord one stack from
+    // above and one from below
+    let n = stacks.len();
+    let mut slot_of = Vec::with_capacity(chords.len());
+    let mut slots: Vec<(usize, Option<bool>)> = Vec::new();
+    for (c, ch) in chords.iter().enumerate() {
+        slot_of.push(slots.len());
+        if ch.len() == 1 {
+            slots.push((c, None));
+        } else {
+            slots.push((c, Some(true)));
+            slots.push((c, Some(false)));
         }
     }
-    let mut staff_of: HashMap<usize, (usize, usize)> = HashMap::new();
-    for row in rows.iter().filter(|r| r.len() >= 3) {
-        let mut votes: HashMap<(usize, usize), usize> = HashMap::new();
-        for &i in row {
-            *votes.entry(cands[i][0].3).or_default() += 1;
+    let real = slots.len();
+    let cols = real + n;
+    let mut cost = vec![FORBIDDEN; n * cols];
+    for (i, cand) in cands.iter().enumerate() {
+        for &(score, chord, above, _) in cand {
+            let slot = slot_of[chord] + usize::from(chords[chord].len() > 1 && !above);
+            // More digits than notes: a worse fit
+            let excess = stacks[i].len().saturating_sub(chords[chord].len()) as f64;
+            cost[i * cols + slot] = score as f64 + excess;
         }
-        let staff = votes
-            .into_iter()
-            .max_by_key(|(s, n)| (*n, std::cmp::Reverse(*s)))
-            .unwrap()
-            .0;
-        for &i in row {
-            staff_of.insert(i, staff);
-        }
+        cost[i * cols + real + i] = UNASSIGNED;
     }
+    let choice = if n == 0 {
+        Vec::new()
+    } else {
+        assign::assign(&cost, n, cols)
+    };
 
     for (i, st) in stacks.iter().enumerate() {
-        let options: Vec<&Candidate> = match staff_of.get(&i) {
-            Some(staff) => {
-                let o: Vec<_> = cands[i].iter().filter(|c| c.3 == *staff).collect();
-                if o.is_empty() {
-                    cands[i].iter().collect()
-                } else {
-                    o
-                }
-            }
-            None => cands[i].iter().collect(),
-        };
-        let Some(&&(_, chord, above, _)) = options.first() else {
+        let slot = choice[i];
+        if slot >= real || cost[i * cols + slot] >= FORBIDDEN {
+            continue;
+        }
+        let chord = slots[slot].0;
+        // The side the stack is on
+        let Some(&(_, _, above, _)) = cands[i].iter().find(|c| c.1 == chord) else {
             continue;
         };
         let ch = &chords[chord];
