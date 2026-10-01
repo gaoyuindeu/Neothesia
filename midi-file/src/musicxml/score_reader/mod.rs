@@ -41,6 +41,8 @@ struct Rect {
     y0: f32,
     x1: f32,
     y1: f32,
+    /// Detector confidence of the object in the box
+    score: f32,
 }
 
 impl Rect {
@@ -193,6 +195,7 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
                 y0: o.y0,
                 x1: o.x1,
                 y1: o.y1,
+                score: o.score,
             };
             if o.class < detect::HEAD_BLACK {
                 page_found
@@ -327,6 +330,7 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
 
     drop_tuplet_numbers(&mut found_pages, &heads, &notes, &note_of_head);
     drop_wedges(&mut found_pages, &heads, &notes, &note_of_head);
+    drop_accidentals(&mut found_pages, &heads, &notes, &note_of_head);
 
     let dump_pairs = std::env::var_os("SCORE_READER_PAIRS").is_some();
     let stem_of_head: Vec<Option<bool>> = note_of_head
@@ -466,6 +470,7 @@ fn snap_to_ink(bits: &page::Bitmap, r: Rect) -> Rect {
         y0: iy0 as f32,
         x1: (ix1 + 1) as f32,
         y1: (iy1 + 1) as f32,
+        score: r.score,
     }
 }
 
@@ -697,6 +702,33 @@ fn drop_wedges(
                     let gap = (top - r.y1).max(r.y0 - bottom);
                     (r.cx() - cx).abs() < 0.6 * il && gap < 2.5 * il
                 })
+        });
+    }
+}
+
+/// Digits where an accidental of the score is printed: left of its note at its height (a
+/// natural or a double sharp read as a 4 or a 1 on a poor scan)
+fn drop_accidentals(
+    pages: &mut [PageFound],
+    heads: &[Head],
+    notes: &[target::Note],
+    note_of_head: &[Option<usize>],
+) {
+    for p in pages.iter_mut() {
+        let il = p.interline;
+        let marked: Vec<Rect> = p
+            .heads
+            .iter()
+            .filter(|&&h| note_of_head[h].is_some_and(|n| notes[n].accidental))
+            .map(|&h| heads[h].rect)
+            .collect();
+        if marked.is_empty() {
+            continue;
+        }
+        p.digits.retain(|(_, r)| {
+            !marked.iter().any(|h| {
+                (r.cy() - h.cy()).abs() < 0.8 * il && r.cx() < h.x0 && r.cx() > h.x0 - 2.5 * il
+            })
         });
     }
 }
@@ -1005,6 +1037,7 @@ fn attach(
                 score,
                 row.len() as f32 / 5.0,
                 agree,
+                st.iter().map(|&d| digits[d].1.score).sum::<f32>() / st.len() as f32,
             ]
         };
         let feats: Vec<Vec<[f32; assoc::FEATURES]>> = (0..stacks.len())

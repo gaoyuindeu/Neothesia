@@ -41,7 +41,7 @@ for f in sorted(glob.glob(os.path.join(pairs_dir, "*.jsonl"))):
 
 # Split by piece: the versions of a piece (prefix o_ / r_ / v_: exact detections, detector on
 # the MuseScore PDF, on the Verovio engraving) on the same side
-base = lambda f: f.split("_", 1)[1] if f[:2] in ("o_", "r_", "v_") else f
+base = lambda f: f.split("_", 1)[1] if f[:2] in ("o_", "r_", "v_", "s_", "w_") else f
 names = sorted({base(f) for f, _ in pieces})
 random.Random(0).shuffle(names)
 val_names = set(names[: max(1, len(names) // 8)])

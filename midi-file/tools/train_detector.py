@@ -46,10 +46,38 @@ FONT_FILES = [os.path.join(os.environ.get("FONTS_DIR", os.path.join(os.path.dirn
     "verdana.ttf", "verdanai.ttf", "trebuc.ttf", "trebucit.ttf", "tahoma.ttf")]
 FONT_FILES = [f for f in FONT_FILES if os.path.exists(f)]
 _fonts = {}
+# SMuFL music font (Bravura, SIL OFL): its fingering digits (Dorico style) as more digits, and
+# articulations and ornaments as things next to notes that are not fingering (a staccatissimo
+# wedge or stroke looks like a 1)
+MUSIC_FONT = os.path.join(os.environ.get("FONTS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")), "Bravura.otf")
+MUSIC_FONT = MUSIC_FONT if os.path.exists(MUSIC_FONT) else None
+SMUFL_FINGERING = {1: 0xED11, 2: 0xED12, 3: 0xED13, 4: 0xED14, 5: 0xED15}
+SMUFL_MARKS = [0xE4A0, 0xE4A1, 0xE4A2, 0xE4A3, 0xE4A4, 0xE4A5, 0xE4A6, 0xE4A7, 0xE4A8, 0xE4A9,
+               0xE4AA, 0xE4AB, 0xE4AC, 0xE4AD, 0xE4C0, 0xE4C1, 0xE566, 0xE56C, 0xE567, 0xE56D]
+NEG = float(os.environ.get("NEG", "0.5"))
+
+
+def glyph_patch(path, code, size):
+    """A glyph of a font at `size` px (gray patch cut to its ink), or None"""
+    key = (path, size)
+    if key not in _fonts:
+        if len(_fonts) > 400:
+            _fonts.clear()
+        _fonts[key] = ImageFont.truetype(path, size)
+    canvas = Image.new("L", (size * 4, size * 4), 255)
+    ImageDraw.Draw(canvas).text((size, size * 3), chr(code), font=_fonts[key], fill=0, anchor="ls")
+    a = np.asarray(canvas)
+    ys, xs = np.nonzero(a < 160)
+    if len(xs) == 0:
+        return None
+    return a[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
 
 
 def digit_patch(rng, digit, height):
     """Digit `digit` (1-5) in a random font, its ink about `height` px tall (gray patch)"""
+    if MUSIC_FONT and rng.random() < 0.15:
+        # SMuFL fingering digits are about a staff space high at 4 spaces per em
+        return glyph_patch(MUSIC_FONT, SMUFL_FINGERING[digit], max(8, int(height * 4)))
     path = rng.choice(FONT_FILES)
     size = max(6, int(height * 1.45))
     key = (path, size)
@@ -157,6 +185,29 @@ class Pages(torch.utils.data.Dataset):
                     continue
                 a0[py:py + ph, px:px + pw] = np.minimum(a0[py:py + ph, px:px + pw], patch)
                 objects.append(nb)
+            im = Image.fromarray(a0)
+        # Articulations and ornaments next to heads: not fingering
+        if near and MUSIC_FONT and rng.random() < NEG:
+            a0 = np.asarray(im).copy()
+            for _ in range(rng.randint(1, 6)):
+                _, hx0, hy0, hx1, hy1 = rng.choice(near)
+                il = max((hx1 - hx0) / 1.25, 8.0)
+                patch = glyph_patch(MUSIC_FONT, rng.choice(SMUFL_MARKS), max(8, int(4 * il * rng.uniform(0.85, 1.15))))
+                if patch is None:
+                    continue
+                ph, pw = patch.shape
+                hcx = (hx0 + hx1) / 2 + rng.uniform(-1.6, 1.6) * il
+                if rng.random() < 0.5:
+                    y = hy0 - rng.uniform(0.2, 2.2) * il - ph
+                else:
+                    y = hy1 + rng.uniform(0.2, 2.2) * il
+                px, py = int(hcx - pw / 2) - left, int(y) - top
+                if px < 0 or py < 0 or px + pw >= size or py + ph >= size:
+                    continue
+                box = (left + px, top + py, left + px + pw - 1, top + py + ph - 1)
+                if any(box[0] <= b[3] and b[1] <= box[2] and box[1] <= b[4] and b[2] <= box[3] for b in objects):
+                    continue
+                a0[py:py + ph, px:px + pw] = np.minimum(a0[py:py + ph, px:px + pw], patch)
             im = Image.fromarray(a0)
         angle = rng.uniform(-1.2, 1.2)
         im = im.rotate(angle, resample=Image.BILINEAR, fillcolor=255)

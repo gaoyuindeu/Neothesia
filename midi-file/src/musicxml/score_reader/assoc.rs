@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 /// Number of features of a (stack, chord) pair
-pub const FEATURES: usize = 20;
+pub const FEATURES: usize = 21;
 
 pub struct Mlp {
     mean: Vec<f32>,

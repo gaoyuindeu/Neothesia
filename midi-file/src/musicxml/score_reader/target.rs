@@ -18,6 +18,8 @@ pub struct Note {
     pub tuplet: Option<(usize, Option<u8>)>,
     /// A staccatissimo / spiccato wedge printed at the note (a short upright stroke, like a 1)
     pub wedge: bool,
+    /// An accidental printed before the note
+    pub accidental: bool,
     /// Voice number of the note in its part
     pub voice: u8,
     /// Stem: Some(true) up, Some(false) down, None none
@@ -221,6 +223,8 @@ pub fn notes(doc: &Document) -> (usize, Vec<Note>) {
                             wedge: el.descendants().any(|d| {
                                 d.has_tag_name("staccatissimo") || d.has_tag_name("spiccato")
                             }),
+                            accidental: child(el, "accidental")
+                                .is_some_and(|a| a.attribute("print-object") != Some("no")),
                         });
                     }
                     _ => {}
