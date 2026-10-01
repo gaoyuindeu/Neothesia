@@ -324,23 +324,23 @@ fn default_separate_channels() -> bool {
     false
 }
 
-fn default_color_schema() -> Vec<ColorSchemaV1> {
+pub(super) fn default_color_schema() -> Vec<ColorSchemaV1> {
     vec![
         ColorSchemaV1 {
             base: (210, 89, 222),
             dark: (125, 69, 134),
         },
         ColorSchemaV1 {
-            base: (93, 188, 255),
-            dark: (48, 124, 255),
+            base: (60, 140, 255),
+            dark: (28, 78, 210),
         },
         ColorSchemaV1 {
             base: (255, 126, 51),
             dark: (192, 73, 0),
         },
         ColorSchemaV1 {
-            base: (51, 255, 102),
-            dark: (0, 168, 2),
+            base: (40, 225, 205),
+            dark: (0, 140, 130),
         },
         ColorSchemaV1 {
             base: (255, 51, 129),

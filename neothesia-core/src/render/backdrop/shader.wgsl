@@ -74,15 +74,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if u.has_image > 0.5 {
         color = sample_cover(uv) * (1.0 - u.dim);
     } else {
-        // Deep gradient with two slowly drifting glows
-        let top = u.base_color + vec3<f32>(0.020, 0.018, 0.050);
-        let bottom = u.base_color + vec3<f32>(0.002, 0.002, 0.008);
-        color = mix(top, bottom, uv.y);
+        // Near black, with a faint cold haze rising from the keyboard and drifting slowly
+        color = u.base_color + vec3<f32>(0.004, 0.005, 0.009);
 
         let t = u.time * 0.05;
-        let a = haze(uv, vec2<f32>(0.3 + 0.15 * sin(t), 0.3 + 0.08 * cos(t * 1.3)), 0.45);
-        let b = haze(uv, vec2<f32>(0.72 + 0.12 * cos(t * 0.8), 0.45 + 0.1 * sin(t * 1.1)), 0.4);
-        color += vec3<f32>(0.035, 0.015, 0.075) * a + vec3<f32>(0.0, 0.03, 0.06) * b;
+        let a = haze(uv, vec2<f32>(0.35 + 0.12 * sin(t), 0.92), 0.5);
+        let b = haze(uv, vec2<f32>(0.68 + 0.1 * cos(t * 0.8), 0.95), 0.45);
+        color += vec3<f32>(0.0, 0.012, 0.03) * a + vec3<f32>(0.0, 0.02, 0.035) * b;
     }
 
     // Vignette

@@ -39,7 +39,7 @@ struct VertexOutput {
 }
 
 // Extra space around each note for its outer glow, in physical pixels
-const GLOW_MARGIN: f32 = 10.0;
+const GLOW_MARGIN: f32 = 8.0;
 
 @vertex
 fn vs_main(vertex: Vertex, note: NoteInstance) -> VertexOutput {
@@ -86,6 +86,10 @@ fn vs_main(vertex: Vertex, note: NoteInstance) -> VertexOutput {
     return out;
 }
 
+fn hash(x: f32) -> f32 {
+    return fract(sin(x * 12.9898) * 43758.5453);
+}
+
 // Signed distance to a rounded rectangle, negative inside
 fn rounded_box_sdf(frag_coord: vec2<f32>, position: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
     let half = size / 2.0;
@@ -97,31 +101,57 @@ fn rounded_box_sdf(frag_coord: vec2<f32>, position: vec2<f32>, size: vec2<f32>, 
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let d = rounded_box_sdf((in.position.xy - view_uniform.origin), in.note_pos, in.size, in.radius);
+    let frag = in.position.xy - view_uniform.origin;
+    let d = rounded_box_sdf(frag, in.note_pos, in.size, in.radius);
     let scale = view_uniform.scale;
 
-    // Outer glow
+    // Light the note up while it is being played
+    let playing = in.note_pos.y <= in.keyboard_y && in.note_pos.y + in.size.y >= in.keyboard_y;
+    let lit = select(1.0, 1.6, playing);
+
+    // Outer glow, thin: a glass bar gives off a soft halo rather than a blob
     if d > 0.5 {
-        let glow = exp(-d / (4.0 * scale)) * 0.45;
+        let glow = exp(-d / (3.0 * scale)) * 0.3 * lit;
         return vec4<f32>(in.color, glow);
     }
 
     let fill_alpha = 1.0 - smoothstep(-0.5, 0.5, d);
+    let local = frag - in.note_pos;
+    let uv = clamp(local / max(in.size, vec2<f32>(1.0)), vec2<f32>(0.0), vec2<f32>(1.0));
 
-    // 0 at the top of the note, 1 at the bottom
-    let t = clamp(((in.position.y - view_uniform.origin.y) - in.note_pos.y) / max(in.size.y, 1.0), 0.0, 1.0);
-    var color = in.color * mix(0.72, 1.12, t);
+    // Glass body: clear in the middle, denser and brighter towards the edges
+    let half_w = max(min(in.size.x, in.size.y) * 0.5, 1.0);
+    let inner = clamp(-d / half_w, 0.0, 1.0);
+    var color = in.color * mix(1.1, 0.45, pow(inner, 0.7));
+
+    // Brighter towards the leading (bottom) edge
+    color *= mix(0.8, 1.2, uv.y);
+
+    // Cut crystal: diagonal facets, each catching a different amount of light. The facets
+    // are anchored to the note, so they fall with it
+    let k = (local.y - local.x * 0.9) / max(in.size.x * 2.6, 1.0);
+    let facet = floor(k);
+    let edge = fract(k);
+    let light = hash(facet + in.note_pos.x * 0.37 + in.size.y * 0.013);
+    color = mix(color * 0.7, color * 1.45 + in.color * 0.15 + vec3<f32>(0.06), light);
+    // Thin bright line where two facets meet
+    color += vec3<f32>(0.15) * (1.0 - smoothstep(0.0, 0.06, min(edge, 1.0 - edge)))
+        * step(1.0, in.size.y / max(in.size.x * 2.6, 1.0));
+
+    // Specular streak down the left side of the bar
+    let sx = (uv.x - 0.24) * in.size.x / (1.4 * scale);
+    color += vec3<f32>(0.55) * exp(-sx * sx) * (0.35 + 0.65 * uv.y) * smoothstep(0.0, 0.05, uv.y);
 
     // Bright rim just inside the edge
-    let rim = 1.0 - smoothstep(0.0, 2.5 * scale, -d);
-    color = mix(color, vec3<f32>(1.0), rim * 0.45);
+    let rim = 1.0 - smoothstep(0.0, 1.8 * scale, -d);
+    color = mix(color, mix(in.color, vec3<f32>(1.0), 0.6), rim * 0.75);
 
-    // Light the note up while it is being played
-    let playing = in.note_pos.y <= in.keyboard_y && in.note_pos.y + in.size.y >= in.keyboard_y;
     if playing {
-        color = mix(color * 1.25, vec3<f32>(1.0), 0.18);
+        color = mix(color * 1.3, vec3<f32>(1.0), 0.2);
     }
 
-    let glow = exp(-max(d, 0.0) / (4.0 * scale)) * 0.45;
-    return vec4<f32>(color, max(fill_alpha, glow));
+    // Translucent: the dark backdrop and guidelines show through the middle of the bar
+    let body_alpha = mix(0.95, 0.72, inner);
+    let glow = exp(-max(d, 0.0) / (3.0 * scale)) * 0.3;
+    return vec4<f32>(color, max(fill_alpha * body_alpha, glow));
 }

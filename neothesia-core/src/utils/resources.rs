@@ -53,7 +53,12 @@ pub fn default_sf2() -> Option<PathBuf> {
     {
         let mut places = vec![PathBuf::from("default.sf2")];
         if let Ok(exe) = std::env::current_exe() {
-            places.extend(exe.ancestors().skip(1).take(4).map(|dir| dir.join("default.sf2")));
+            places.extend(
+                exe.ancestors()
+                    .skip(1)
+                    .take(4)
+                    .map(|dir| dir.join("default.sf2")),
+            );
         }
         places.push(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))

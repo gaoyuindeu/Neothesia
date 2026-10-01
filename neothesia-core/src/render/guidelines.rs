@@ -64,9 +64,9 @@ impl GuidelineRenderer {
 
             // Translucent, so that they sit nicely on top of a background image
             let color = if key.note_id() == 0 {
-                [1.0, 1.0, 1.0, 0.07]
+                [0.6, 0.8, 1.0, 0.035]
             } else {
-                [1.0, 1.0, 1.0, 0.025]
+                [0.6, 0.8, 1.0, 0.012]
             };
 
             self.cache.push(QuadInstance {

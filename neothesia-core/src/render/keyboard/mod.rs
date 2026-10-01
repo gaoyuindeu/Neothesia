@@ -99,7 +99,7 @@ impl KeyboardRenderer {
         instances.push(QuadInstance {
             position: [self.pos.x, self.pos.y - 4.0],
             size: [self.layout.width, 4.0],
-            color: [0.25, 0.02, 0.02, 1.0],
+            color: [0.01, 0.04, 0.12, 1.0],
             ..Default::default()
         });
 

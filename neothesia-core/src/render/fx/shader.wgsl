@@ -74,12 +74,56 @@ fn line(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(rgb, (glow * 0.6 + core) * ends * color.a);
 }
 
+// Hash without sine (Dave Hoskins), stable on every GPU
+fn hash(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash(i);
+    let b = hash(i + vec2<f32>(1.0, 0.0));
+    let c = hash(i + vec2<f32>(0.0, 1.0));
+    let d = hash(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Puff of smoke: a soft blob broken up by noise, each puff (seed) shaped differently
+fn smoke(uv: vec2<f32>, color: vec4<f32>, seed: f32) -> vec4<f32> {
+    let r = length(uv - vec2<f32>(0.5)) * 2.0;
+    let blob = pow(clamp(1.0 - r, 0.0, 1.0), 1.8);
+    let p = uv * 2.2 + vec2<f32>(seed * 37.0, seed * 91.0);
+    let n = value_noise(p) * 0.55 + value_noise(p * 2.03 + 5.0) * 0.3
+        + value_noise(p * 4.1 + 11.0) * 0.15;
+    let wisps = smoothstep(0.25, 0.8, n);
+    return vec4<f32>(color.rgb, blob * wisps * color.a);
+}
+
+// Four pointed glint
+fn glint(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
+    let p = abs(uv - vec2<f32>(0.5)) * 2.0;
+    let r = length(p);
+    let rays = exp(-p.x * 26.0) * (1.0 - p.y) + exp(-p.y * 26.0) * (1.0 - p.x);
+    let core = pow(clamp(1.0 - r * 3.0, 0.0, 1.0), 2.0);
+    let a = clamp(rays * 0.8 + core, 0.0, 1.0) * clamp(1.0 - r, 0.0, 1.0);
+    return vec4<f32>(mix(color.rgb, vec3<f32>(1.0), core), a * color.a);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if in.kind < 0.5 {
         return orb(in.uv, in.color);
     } else if in.kind < 1.5 {
         return beam(in.uv, in.color);
+    } else if in.kind < 2.5 {
+        return line(in.uv, in.color);
+    } else if in.kind < 3.5 {
+        return glint(in.uv, in.color);
     }
-    return line(in.uv, in.color);
+    // Smoke: the fraction above 4 is the puff's seed
+    return smoke(in.uv, in.color, in.kind - 4.0);
 }

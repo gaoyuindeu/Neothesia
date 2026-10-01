@@ -798,6 +798,9 @@ impl Workspace {
     /// hides the track's falling notes, the button beside it cycles Auto, Human (you play
     /// it) and Mute
     fn hand_controls(&mut self, ctx: &Context, ui: &mut nuon::Ui, actions: &mut Vec<Action>) {
+        // A score (or a MIDI file with its score) can take fingering from a PDF
+        let pdf_row = self.fingering_target().is_some();
+        let importing = self.fingering_import.is_some() || self.pdf_picker.is_some();
         let Some(song) = self.song.as_ref() else {
             return;
         };
@@ -821,7 +824,7 @@ impl Workspace {
         const W: f32 = 196.0;
         let x = self.sidebar_w() + view.width - W - 12.0;
         let y = sheet_h + 10.0;
-        let h = ROW * tracks.len() as f32 + 8.0;
+        let h = ROW * tracks.len() as f32 + 8.0 + if pdf_row { ROW + 4.0 } else { 0.0 };
         self.hands_rect = Some([x, y, W, h]);
 
         nuon::quad()
@@ -904,6 +907,46 @@ impl Workspace {
                 .build(ui);
             if mode.is_clicked() {
                 actions.push(Action::SetPlayer(track.track_id, next));
+            }
+        }
+        if pdf_row {
+            let by = y + 6.0 + ROW * tracks.len() as f32;
+            let button = nuon::click_area("hand_pdf")
+                .pos(x + 6.0, by)
+                .size(W - 12.0, ROW - 2.0)
+                .build(ui);
+            nuon::quad()
+                .pos(x + 6.0, by)
+                .size(W - 12.0, ROW - 2.0)
+                .color(if importing || button.is_hovered() {
+                    ACCENT
+                } else {
+                    SELECTED
+                })
+                .border_radius([11.0; 4])
+                .build(ui);
+            nuon::label()
+                .icon(icon::PDF)
+                .pos(x + 12.0, by)
+                .size(20.0, ROW - 2.0)
+                .font_size(14.0)
+                .color(TEXT)
+                .text_justify(TextAlign::Center)
+                .build(ui);
+            nuon::label()
+                .text(if importing {
+                    "Reading the PDF\u{2026}"
+                } else {
+                    "Fingering from PDF"
+                })
+                .pos(x + 34.0, by)
+                .size(W - 46.0, ROW - 2.0)
+                .font_size(12.5)
+                .color(TEXT)
+                .text_justify(TextAlign::Start)
+                .build(ui);
+            if button.is_clicked() && !importing {
+                actions.push(Action::ImportFingering);
             }
         }
     }

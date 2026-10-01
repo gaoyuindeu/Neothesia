@@ -109,7 +109,24 @@ impl Default for Config {
 
 impl Config {
     pub fn new() -> Self {
-        Model::load().build()
+        let mut config = Model::load().build();
+        config.update_hand_colors();
+        config
+    }
+
+    /// The hand colors used to be green (right) and light blue (left); settings that still
+    /// have those get the new teal and blue
+    fn update_hand_colors(&mut self) {
+        let schema = &mut self.appearance.color_schema;
+        let old = |c: &ColorSchemaV1, base, dark| c.base == base && c.dark == dark;
+        let defaults = model::default_color_schema();
+        if schema.len() > 3
+            && old(&schema[1], (93, 188, 255), (48, 124, 255))
+            && old(&schema[3], (51, 255, 102), (0, 168, 2))
+        {
+            schema[1] = defaults[1].clone();
+            schema[3] = defaults[3].clone();
+        }
     }
 
     pub fn piano_range(&self) -> std::ops::RangeInclusive<u8> {

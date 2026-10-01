@@ -1,5 +1,5 @@
-//! Additive light effects drawn over the keyboard: sparks rising from pressed keys,
-//! light columns, key bloom and the glowing hit line.
+//! Additive light effects drawn over the keyboard: sparks, glints and smoke rising from
+//! pressed keys, light columns, key bloom and the glowing hit line.
 
 use std::time::Duration;
 
@@ -18,6 +18,9 @@ struct FxInstance {
 const KIND_ORB: f32 = 0.0;
 const KIND_BEAM: f32 = 1.0;
 const KIND_LINE: f32 = 2.0;
+const KIND_GLINT: f32 = 3.0;
+/// Smoke puffs are 4 + their seed (0..1)
+const KIND_SMOKE: f32 = 4.0;
 
 impl FxInstance {
     fn attributes() -> [wgpu::VertexAttribute; 4] {
@@ -114,7 +117,17 @@ impl FxPipeline {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ParticleKind {
+    Spark,
+    Glint,
+    Smoke,
+}
+
 struct Particle {
+    kind: ParticleKind,
+    /// Shape of a smoke puff
+    seed: f32,
     pos: [f32; 2],
     vel: [f32; 2],
     age: f32,
@@ -152,8 +165,6 @@ struct KeyFx {
     color: [f32; 3],
     x: f32,
     width: f32,
-    /// Fractional particles carried over between frames
-    emit_carry: f32,
 }
 
 /// How long the light lingers after a key is released
@@ -232,59 +243,105 @@ impl FxRenderer {
                 state.flash = 1.0;
             }
             let held = state.held_for.get_or_insert(0.0);
+            let before = *held;
             *held += dt;
+            let held = *held;
 
-            // Burst of sparks on note on, then a steady trickle while held
-            let emit = if just_pressed {
-                36.0
-            } else {
-                state.emit_carry + dt * 60.0
-            };
-            let count = emit.floor();
-            state.emit_carry = emit - count;
-
-            for _ in 0..count as usize {
-                if self.particles.len() >= MAX_PARTICLES {
-                    break;
-                }
-                let burst = just_pressed;
-                let speed = if burst {
-                    self.rng.range(180.0, 520.0)
+            // Burst on note on, then a steady trickle while held (`rate` per second)
+            let count = |burst: usize, rate: f32| {
+                if just_pressed {
+                    burst
                 } else {
-                    self.rng.range(90.0, 260.0)
-                };
-                let spread = if burst { 0.55 } else { 0.25 };
-                let angle = self.rng.range(-spread, spread);
+                    ((held * rate).floor() - (before * rate).floor()) as usize
+                }
+            };
+            let sparks = count(20, 30.0);
+            let glints = count(3, 4.0);
+            let puffs = count(5, 9.0);
 
-                self.particles.push(Particle {
+            for _ in 0..sparks {
+                let speed = if just_pressed {
+                    self.rng.range(160.0, 460.0)
+                } else {
+                    self.rng.range(80.0, 230.0)
+                };
+                let spread = if just_pressed { 0.5 } else { 0.22 };
+                let angle = self.rng.range(-spread, spread);
+                let particle = Particle {
+                    kind: ParticleKind::Spark,
+                    seed: 0.0,
                     pos: [x + self.rng.range(-0.4, 0.4) * key.width, line_y],
                     vel: [angle.sin() * speed, -angle.cos() * speed],
                     age: 0.0,
-                    life: self.rng.range(0.6, 1.6),
-                    size: self.rng.range(5.0, 14.0),
-                    // Slight random tint and sparkle, so the sparks don't look flat
-                    color: {
-                        let white = self.rng.range(0.0, 0.5);
-                        let tint = [
-                            self.rng.range(0.85, 1.15),
-                            self.rng.range(0.85, 1.15),
-                            self.rng.range(0.85, 1.15),
-                        ];
-                        [0, 1, 2].map(|i| (color[i] * tint[i]) * (1.0 - white) + white)
-                    },
+                    life: self.rng.range(0.5, 1.4),
+                    size: self.rng.range(3.0, 9.0),
+                    color: self.tinted(color, 0.5),
                     phase: self.rng.range(0.0, std::f32::consts::TAU),
-                });
+                };
+                self.push(particle);
+            }
+
+            for _ in 0..glints {
+                let angle = self.rng.range(-0.35, 0.35);
+                let speed = self.rng.range(120.0, 340.0);
+                let particle = Particle {
+                    kind: ParticleKind::Glint,
+                    seed: 0.0,
+                    pos: [x + self.rng.range(-0.5, 0.5) * key.width, line_y],
+                    vel: [angle.sin() * speed, -angle.cos() * speed],
+                    age: 0.0,
+                    life: self.rng.range(0.4, 0.9),
+                    size: self.rng.range(10.0, 22.0),
+                    color: self.tinted(color, 0.6),
+                    phase: self.rng.range(0.0, std::f32::consts::TAU),
+                };
+                self.push(particle);
+            }
+
+            for _ in 0..puffs {
+                let speed = self.rng.range(50.0, 130.0);
+                let angle = self.rng.range(-0.3, 0.3);
+                // Smoke is a pale, slightly blue version of the note color
+                let smoke = [0.35, 0.42, 0.5];
+                let particle = Particle {
+                    kind: ParticleKind::Smoke,
+                    seed: self.rng.next() * 0.999,
+                    pos: [x + self.rng.range(-0.3, 0.3) * key.width, line_y - 6.0],
+                    vel: [angle.sin() * speed, -angle.cos() * speed],
+                    age: 0.0,
+                    life: self.rng.range(1.4, 2.8),
+                    size: self.rng.range(key.width * 1.8, key.width * 3.2),
+                    color: [0, 1, 2].map(|i| color[i] * 0.55 + smoke[i]),
+                    phase: self.rng.range(0.0, std::f32::consts::TAU),
+                };
+                self.push(particle);
             }
         }
 
         for (state, pressed) in self.keys.iter_mut().zip(is_pressed) {
             if !pressed {
                 state.held_for = None;
-                state.emit_carry = 0.0;
                 state.intensity = (state.intensity - dt / RELEASE_TIME).max(0.0);
             }
             state.flash *= (-dt * 7.0).exp();
         }
+    }
+
+    fn push(&mut self, particle: Particle) {
+        if self.particles.len() < MAX_PARTICLES {
+            self.particles.push(particle);
+        }
+    }
+
+    /// Key color with a slight random tint and some white, so the light doesn't look flat
+    fn tinted(&mut self, color: [f32; 3], max_white: f32) -> [f32; 3] {
+        let white = self.rng.range(0.0, max_white);
+        let tint = [
+            self.rng.range(0.85, 1.15),
+            self.rng.range(0.85, 1.15),
+            self.rng.range(0.85, 1.15),
+        ];
+        [0, 1, 2].map(|i| (color[i] * tint[i]) * (1.0 - white) + white)
     }
 
     fn update_particles(&mut self, dt: f32) {
@@ -295,12 +352,16 @@ impl FxRenderer {
                 return false;
             }
 
-            // Buoyancy, air drag and a gentle sideways wobble
-            p.vel[1] -= 60.0 * dt;
-            let drag = (1.0 - 1.6 * dt).max(0.0);
+            // Buoyancy, air drag and a sideways wobble; smoke drifts slowly and curls
+            let (lift, drag, wobble, freq) = match p.kind {
+                ParticleKind::Smoke => (25.0, 0.9, 55.0, 1.3),
+                _ => (60.0, 1.6, 40.0, 3.0),
+            };
+            p.vel[1] -= lift * dt;
+            let drag = (1.0 - drag * dt).max(0.0);
             p.vel[0] *= drag;
             p.vel[1] *= drag;
-            p.vel[0] += (time * 3.0 + p.phase).sin() * 40.0 * dt;
+            p.vel[0] += (time * freq + p.phase).sin() * wobble * dt;
 
             p.pos[0] += p.vel[0] * dt;
             p.pos[1] += p.vel[1] * dt;
@@ -312,13 +373,38 @@ impl FxRenderer {
         let instances = &mut self.pipeline.instances.data;
         instances.clear();
 
-        // Hit line along the top of the keyboard
+        // Hit line along the top of the keyboard: a bright blue band in a wide soft halo
         instances.push(FxInstance {
-            position: [line_x, line_y - 4.0 - 15.0],
-            size: [line_w, 30.0],
-            color: [0.55, 0.75, 1.0, 0.5],
+            position: [line_x, line_y - 2.0 - 45.0],
+            size: [line_w, 90.0],
+            color: [0.1, 0.4, 1.0, 0.35],
             kind: KIND_LINE,
         });
+        instances.push(FxInstance {
+            position: [line_x, line_y - 2.0 - 12.0],
+            size: [line_w, 24.0],
+            color: [0.3, 0.65, 1.0, 1.0],
+            kind: KIND_LINE,
+        });
+
+        // Smoke first, sparks and glints shine on top of it
+        for particle in self
+            .particles
+            .iter()
+            .filter(|p| p.kind == ParticleKind::Smoke)
+        {
+            let t = particle.age / particle.life;
+            // Fade in quickly, thin out slowly while it spreads
+            let fade = (t * 8.0).min(1.0) * (1.0 - t) * (1.0 - t);
+            let size = particle.size * (1.0 + 2.2 * t);
+            let [r, g, b] = particle.color;
+            instances.push(FxInstance {
+                position: [particle.pos[0] - size / 2.0, particle.pos[1] - size / 2.0],
+                size: [size, size],
+                color: [r, g, b, 0.22 * fade],
+                kind: KIND_SMOKE + particle.seed,
+            });
+        }
 
         // Light columns and bloom, for held keys and the ones fading out
         for state in self.keys.iter().filter(|k| k.intensity > 0.01) {
@@ -328,12 +414,12 @@ impl FxRenderer {
             let intensity = state.intensity * state.intensity;
             let boost = 1.0 + 1.5 * state.flash;
 
-            let beam_w = state.width * 1.6;
-            let beam_h = 260.0 * (0.7 + 0.3 * intensity);
+            let beam_w = state.width * 1.4;
+            let beam_h = 200.0 * (0.7 + 0.3 * intensity);
             instances.push(FxInstance {
                 position: [cx - beam_w / 2.0, line_y - beam_h],
                 size: [beam_w, beam_h],
-                color: [r, g, b, 0.55 * intensity * boost],
+                color: [r, g, b, 0.3 * intensity * boost],
                 kind: KIND_BEAM,
             });
 
@@ -353,16 +439,27 @@ impl FxRenderer {
             });
         }
 
-        for particle in &self.particles {
+        for particle in self
+            .particles
+            .iter()
+            .filter(|p| p.kind != ParticleKind::Smoke)
+        {
             let t = particle.age / particle.life;
-            let fade = (1.0 - t) * (1.0 - t);
+            let mut fade = (1.0 - t) * (1.0 - t);
             let size = particle.size * (1.0 - 0.6 * t);
+            let kind = if particle.kind == ParticleKind::Glint {
+                // Twinkle
+                fade *= 0.6 + 0.4 * (self.time * 25.0 + particle.phase * 3.0).sin();
+                KIND_GLINT
+            } else {
+                KIND_ORB
+            };
             let [r, g, b] = particle.color;
             instances.push(FxInstance {
                 position: [particle.pos[0] - size / 2.0, particle.pos[1] - size / 2.0],
                 size: [size, size],
                 color: [r, g, b, fade],
-                kind: KIND_ORB,
+                kind,
             });
         }
     }
