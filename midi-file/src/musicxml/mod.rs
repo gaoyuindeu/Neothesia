@@ -2,12 +2,18 @@
 //! and MIDI generated from it for playback.
 
 mod build;
+mod fingering_transfer;
+pub mod omr;
 mod parse;
 
 use std::path::Path;
 
 use crate::MidiFile;
 
+pub use fingering_transfer::{
+    TransferReport, note_fingerings, strip_fingering, transfer as transfer_fingering,
+    transfer_into_file as transfer_fingering_into_file,
+};
 pub use parse::{RawScore, parse, read_file};
 
 /// File extensions of MusicXML scores

@@ -180,6 +180,14 @@ impl Config {
         self.history.library_folders = folders;
     }
 
+    pub fn audiveris_path(&self) -> Option<&std::path::Path> {
+        self.history.audiveris_path.as_deref()
+    }
+
+    pub fn set_audiveris_path(&mut self, path: Option<PathBuf>) {
+        self.history.audiveris_path = path;
+    }
+
     pub fn sidebar_visible(&self) -> bool {
         self.history.sidebar_visible
     }

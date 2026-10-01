@@ -286,6 +286,32 @@ impl super::MenuScene {
                             })
                             .build(ui, rows);
 
+                        spacer(ui);
+
+                        let audiveris =
+                            midi_file::musicxml::omr::find_audiveris(ctx.config.audiveris_path());
+                        nuon::settings_row()
+                            .title("Audiveris (fingering from PDF)")
+                            .subtitle(
+                                audiveris
+                                    .as_ref()
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_else(|| {
+                                        "Not found: winget install audiveris.org.Audiveris"
+                                            .to_string()
+                                    }),
+                            )
+                            .body(|ui, row_w, row_h| {
+                                if setting_row_button(row_w, row_h)
+                                    .label("Select File")
+                                    .build(ui)
+                                {
+                                    self.futures
+                                        .push(self::open_audiveris_picker(&mut self.state));
+                                }
+                            })
+                            .build(ui, rows);
+
                         if has_background {
                             spacer(ui);
 
@@ -743,6 +769,25 @@ pub fn open_background_picker(data: &mut UiState) -> BoxFuture<MsgFn> {
         }
         data.is_loading = false;
     })
+}
+
+pub fn open_audiveris_picker(data: &mut UiState) -> BoxFuture<MsgFn> {
+    data.is_loading = true;
+    on_async(open_audiveris_picker_fut(), |res, data, ctx| {
+        if let Some(path) = res {
+            ctx.config.set_audiveris_path(Some(path));
+        }
+        data.is_loading = false;
+    })
+}
+
+async fn open_audiveris_picker_fut() -> Option<PathBuf> {
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("Audiveris program")
+        .pick_file()
+        .await;
+
+    file.map(|f| f.path().to_owned())
 }
 
 async fn open_background_picker_fut() -> Option<PathBuf> {

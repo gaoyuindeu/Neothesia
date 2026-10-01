@@ -75,6 +75,9 @@ pub struct HistoryV1 {
     /// Folders shown in the library side bar
     #[serde(default)]
     pub library_folders: Vec<PathBuf>,
+    /// Audiveris program, for reading fingering from PDFs (found automatically if None)
+    #[serde(default)]
+    pub audiveris_path: Option<PathBuf>,
     #[serde(default = "default_sidebar_visible")]
     pub sidebar_visible: bool,
     #[serde(default = "default_sidebar_width")]
@@ -99,6 +102,7 @@ impl Default for History {
         Self::V1(HistoryV1 {
             last_opened_song: None,
             library_folders: Vec::new(),
+            audiveris_path: None,
             sidebar_visible: default_sidebar_visible(),
             sidebar_width: default_sidebar_width(),
         })

@@ -56,6 +56,7 @@ mod icon {
     pub const LIBRARY: &str = "\u{F3C2}";
     pub const TRACKS: &str = "\u{F49F}";
     pub const KEYBOARD: &str = "\u{F451}";
+    pub const PDF: &str = "\u{F63E}";
     pub const SETTINGS: &str = "\u{F3E5}";
     pub const CHEVRON_RIGHT: &str = "\u{F285}";
     pub const CHEVRON_DOWN: &str = "\u{F282}";
@@ -92,6 +93,12 @@ impl MainView {
 }
 
 /// A song file being read on another thread
+/// Fingering read from a PDF going into a MusicXML score, on another thread
+struct FingeringImport {
+    score: PathBuf,
+    rx: mpsc::Receiver<Result<midi_file::musicxml::TransferReport, String>>,
+}
+
 struct Loading {
     path: PathBuf,
     rx: mpsc::Receiver<Result<midi_file::MidiFile, String>>,
@@ -114,6 +121,7 @@ enum Action {
     StartResize(f32),
     Page(Page),
     Freeplay,
+    ImportFingering,
 }
 
 pub struct Workspace {
@@ -135,6 +143,9 @@ pub struct Workspace {
     divider_drag: Option<f32>,
 
     loading: Option<Loading>,
+    /// Waiting for the PDF to read fingering from, for this score
+    pdf_picker: Option<(PathBuf, BoxFuture<Option<PathBuf>>)>,
+    fingering_import: Option<FingeringImport>,
     status: Status,
     folder_picker: Option<BoxFuture<Option<PathBuf>>>,
 
@@ -183,6 +194,8 @@ impl Workspace {
             loading: None,
             status: Status::None,
             folder_picker: None,
+            pdf_picker: None,
+            fingering_import: None,
             gfx,
             nuon: nuon::Ui::new(),
             nuon_renderer,
@@ -260,6 +273,119 @@ impl Workspace {
             .ok();
         self.status = Status::Info(format!("Loading {}\u{2026}", file_name(&path)));
         self.loading = Some(Loading { path, rx });
+    }
+
+    /// The MusicXML file fingering read from a PDF goes into: the open score, or the
+    /// score paired with the open recording
+    fn fingering_target(&self) -> Option<PathBuf> {
+        let path = self.song_path.as_ref()?;
+        if midi_file::musicxml::is_musicxml(path) {
+            Some(path.clone())
+        } else {
+            midi_file::align::find_score_for(path)
+        }
+    }
+
+    fn start_fingering_import(&mut self) {
+        if self.fingering_import.is_some() || self.pdf_picker.is_some() {
+            return;
+        }
+        let Some(score) = self.fingering_target() else {
+            self.status = Status::Error(
+                "Open a MusicXML score first: the fingering is written into it".into(),
+            );
+            return;
+        };
+        let picker = Box::pin(async {
+            rfd::AsyncFileDialog::new()
+                .set_title("Printed score with fingering")
+                .add_filter(
+                    "PDF / image",
+                    &["pdf", "PDF", "png", "jpg", "jpeg", "tif", "tiff"],
+                )
+                .pick_file()
+                .await
+                .map(|f| f.path().to_path_buf())
+        });
+        self.pdf_picker = Some((score, picker));
+    }
+
+    /// Read the PDF with Audiveris and move its fingering into `score`
+    fn run_fingering_import(&mut self, ctx: &Context, score: PathBuf, pdf: PathBuf) {
+        let Some(audiveris) = midi_file::musicxml::omr::find_audiveris(ctx.config.audiveris_path())
+        else {
+            self.status = Status::Error(
+                "Audiveris is needed to read PDFs: winget install audiveris.org.Audiveris".into(),
+            );
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let target = score.clone();
+        std::thread::Builder::new()
+            .name("fingering-import".into())
+            .spawn(move || {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let work = std::env::temp_dir()
+                    .join("neothesia_omr")
+                    .join(stamp.to_string());
+                let result = midi_file::musicxml::omr::recognize(&audiveris, &pdf, &work).and_then(
+                    |sources| midi_file::musicxml::transfer_fingering_into_file(&target, &sources),
+                );
+                std::fs::remove_dir_all(&work).ok();
+                tx.send(result).ok();
+            })
+            .ok();
+        self.status =
+            Status::Info("Reading the PDF with Audiveris\u{2026} (can take minutes)".into());
+        self.fingering_import = Some(FingeringImport { score, rx });
+    }
+
+    fn poll_fingering_import(&mut self, ctx: &Context) {
+        if let Some((_, picker)) = self.pdf_picker.as_mut() {
+            let mut cx = std::task::Context::from_waker(noop_waker_ref());
+            if let std::task::Poll::Ready(pdf) = picker.as_mut().poll(&mut cx) {
+                let (score, _) = self.pdf_picker.take().unwrap();
+                if let Some(pdf) = pdf {
+                    self.run_fingering_import(ctx, score, pdf);
+                }
+            }
+        }
+
+        let Some(import) = &self.fingering_import else {
+            return;
+        };
+        let result = match import.rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("the import stopped".into()),
+        };
+        let score = self.fingering_import.take().unwrap().score;
+        match result {
+            Ok(report) if report.found == 0 => {
+                self.status = Status::Error("No fingering was recognized in the PDF".into());
+            }
+            Ok(report) => {
+                self.status = Status::Info(format!(
+                    "Fingering from PDF: {} read, {} written into {}",
+                    report.found,
+                    report.written,
+                    file_name(&score)
+                ));
+                // Show it: open the song again
+                if report.written > 0
+                    && let Some(path) = self.song_path.clone()
+                {
+                    self.load(path);
+                }
+            }
+            Err(err) => {
+                log::error!("Fingering import: {err}");
+                self.status = Status::Error(err);
+            }
+        }
     }
 
     fn poll_loading(&mut self, ctx: &mut Context) {
@@ -379,6 +505,7 @@ impl Workspace {
 
     pub fn update(&mut self, ctx: &mut Context, delta: Duration) {
         self.poll_loading(ctx);
+        self.poll_fingering_import(ctx);
 
         if let Some(picker) = self.folder_picker.as_mut() {
             let mut cx = std::task::Context::from_waker(noop_waker_ref());
@@ -465,6 +592,7 @@ impl Workspace {
             }
             Action::StartResize(offset) => self.divider_drag = Some(offset),
             Action::Page(page) => self.toggle_page(ctx, page),
+            Action::ImportFingering => self.start_fingering_import(),
             Action::Freeplay => match self.main {
                 MainView::Freeplay(_) => self.back(ctx, None),
                 _ => self.show_freeplay(ctx),
@@ -661,6 +789,12 @@ impl Workspace {
                 matches!(self.main, MainView::Freeplay(_)),
                 ACTIVITY_W * 2.0,
                 Action::Freeplay,
+            ),
+            (
+                icon::PDF,
+                self.fingering_import.is_some() || self.pdf_picker.is_some(),
+                ACTIVITY_W * 3.0,
+                Action::ImportFingering,
             ),
             (
                 icon::SETTINGS,
