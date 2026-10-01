@@ -237,6 +237,8 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
 
     // Each staff of the score: found chords and written chords, aligned
     let mut note_of_head: Vec<Option<usize>> = vec![None; heads.len()];
+    // Notes of other voices in unison with a head's note
+    let mut unison_of_head: Vec<Vec<usize>> = vec![Vec::new(); heads.len()];
     for k in 0..per_system {
         let found = found_chords(&heads, k, &found_pages);
         let written = written_chords(&notes, k);
@@ -265,12 +267,22 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
             if align::chord_similarity(&found_pos[i], &written_pos[j]) < 0.5 {
                 continue;
             }
-            for (f, w) in align::pair_notes(&found_pos[i], &written_pos[j])
-                .into_iter()
-                .enumerate()
-            {
-                if let Some(w) = w {
+            let pairs = align::pair_notes(&found_pos[i], &written_pos[j]);
+            for (f, w) in pairs.iter().enumerate() {
+                if let Some(w) = *w {
                     note_of_head[found[i][f]] = Some(written[j][w]);
+                }
+            }
+            // A unison of two voices is one head on the page: the other note goes with it
+            for (w, &pos) in written_pos[j].iter().enumerate() {
+                if pairs.contains(&Some(w)) {
+                    continue;
+                }
+                if let Some(f) = pairs
+                    .iter()
+                    .position(|p| p.is_some_and(|o| written_pos[j][o] == pos))
+                {
+                    unison_of_head[found[i][f]].push(written[j][w]);
                 }
             }
         }
@@ -280,6 +292,7 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
         aligned: note_of_head
             .iter()
             .flatten()
+            .chain(unison_of_head.iter().flatten())
             .map(|&n| notes[n].node)
             .collect(),
         ..Default::default()
@@ -288,9 +301,11 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
         for &h in &p.heads {
             if let Some(n) = note_of_head[h] {
                 let r = heads[h].rect;
-                details
-                    .heads
-                    .insert(notes[n].node, (page_no, [r.x0, r.y0, r.x1, r.y1]));
+                for &m in std::iter::once(&n).chain(&unison_of_head[h]) {
+                    details
+                        .heads
+                        .insert(notes[m].node, (page_no, [r.x0, r.y0, r.x1, r.y1]));
+                }
             }
         }
     }
@@ -361,11 +376,13 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
         for (digit, head) in attached {
             report.attached += 1;
             if let Some(n) = note_of_head[head] {
-                fingers.push((notes[n].node, p.digits[digit].0, notes[n].has_fingering));
-                details
-                    .digits
-                    .entry(notes[n].node)
-                    .or_insert(p.digits[digit].0);
+                for &m in std::iter::once(&n).chain(&unison_of_head[head]) {
+                    fingers.push((notes[m].node, p.digits[digit].0, notes[m].has_fingering));
+                    details
+                        .digits
+                        .entry(notes[m].node)
+                        .or_insert(p.digits[digit].0);
+                }
             }
         }
     }
