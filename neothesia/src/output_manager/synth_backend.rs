@@ -217,10 +217,15 @@ fn oxisynth_adapter<'a>(
         mode: Default::default(),
     });
 
+    // Without a usable SoundFont the synth stays silent instead of taking the app down
+    match std::fs::File::open(path)
+        .map_err(|e| e.to_string())
+        .and_then(|mut file| oxisynth::SoundFont::load(&mut file).map_err(|e| format!("{e:?}")))
     {
-        let mut file = std::fs::File::open(path).unwrap();
-        let font = oxisynth::SoundFont::load(&mut file).unwrap();
-        synth.add_font(font, true);
+        Ok(font) => {
+            synth.add_font(font, true);
+        }
+        Err(e) => log::error!("SoundFont {}: {e}", path.display()),
     }
 
     move || {

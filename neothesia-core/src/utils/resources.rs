@@ -47,8 +47,21 @@ pub fn default_sf2() -> Option<PathBuf> {
         development.exists().then_some(development)
     }
 
+    // The working directory, then next to the executable and a few folders up (started from
+    // targetelease of a checkout by double click), then the checkout itself
     #[cfg(target_os = "windows")]
-    return Some(PathBuf::from("./default.sf2"));
+    {
+        let mut places = vec![PathBuf::from("default.sf2")];
+        if let Ok(exe) = std::env::current_exe() {
+            places.extend(exe.ancestors().skip(1).take(4).map(|dir| dir.join("default.sf2")));
+        }
+        places.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("default.sf2"),
+        );
+        return places.into_iter().find(|p| p.exists());
+    }
 
     #[cfg(target_os = "macos")]
     return bundled_resource_path("default", "sf2").map(PathBuf::from);
