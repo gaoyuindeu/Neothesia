@@ -284,12 +284,20 @@ fn main() {
                 )
             })
             .collect();
+        let stages: Vec<String> = details
+            .stages
+            .iter()
+            .map(|(s, p, d, b)| {
+                format!(r#"{{"stage": "{s}", "page": {p}, "digit": {d}, "box": {b:?}}}"#)
+            })
+            .collect();
         std::fs::write(
             path,
             format!(
-                "{{\"lost\": [{}], \"digits\": [{}]}}",
+                "{{\"lost\": [{}], \"digits\": [{}], \"stages\": [{}]}}",
                 lost.join(","),
-                digits.join(",")
+                digits.join(","),
+                stages.join(",")
             ),
         )
         .unwrap();
@@ -320,15 +328,50 @@ fn main() {
             let known = pair.notes.iter().any(|n| {
                 n.is_some_and(|n| truth_fingers.contains_key(&n) || !excluded.contains(&n))
             });
+            // The fingers of the chord's notes in the score (0: none)
+            let truths: Vec<u8> = pair
+                .notes
+                .iter()
+                .map(|n| n.and_then(|n| truth_fingers.get(&n)).map_or(0, |a| a[0]))
+                .collect();
+            // Stem (u / d / -) and voice of the chord's notes
+            let child_text = |n: NodeId, name: &str| -> String {
+                stripped_doc
+                    .get_node(n)
+                    .unwrap()
+                    .children()
+                    .find(|c| c.has_tag_name(name))
+                    .and_then(|c| c.text())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            };
+            let stems: String = pair
+                .notes
+                .iter()
+                .map(|n| match n.map(|n| child_text(n, "stem")).as_deref() {
+                    Some("up") => 'u',
+                    Some("down") => 'd',
+                    _ => '-',
+                })
+                .collect();
+            let voices: Vec<String> = pair
+                .notes
+                .iter()
+                .map(|n| n.map(|n| child_text(n, "voice")).unwrap_or_default())
+                .collect();
             lines.push_str(&format!(
-                "{{\"page\": {}, \"stack\": {}, \"size\": {}, \"matched\": {}, \"known\": {}, \"features\": {:?}}}
-",
+                "{{\"page\": {}, \"stack\": {}, \"size\": {}, \"matched\": {}, \"known\": {}, \"features\": {:?}, \"boxes\": {:?}, \"heads\": {:?}, \"digits\": {:?}, \"truths\": {:?}, \"stems\": {stems:?}, \"voices\": {voices:?}}}\n",
                 pair.page,
                 pair.stack,
                 pair.digits.len(),
                 matched,
                 known,
-                pair.features
+                pair.features,
+                pair.boxes,
+                pair.heads,
+                pair.digits,
+                truths
             ));
         }
         std::fs::write(path, lines).unwrap();

@@ -18,6 +18,10 @@ pub struct Note {
     pub tuplet: Option<(usize, Option<u8>)>,
     /// A staccatissimo / spiccato wedge printed at the note (a short upright stroke, like a 1)
     pub wedge: bool,
+    /// Voice number of the note in its part
+    pub voice: u8,
+    /// Stem: Some(true) up, Some(false) down, None none
+    pub stem_up: Option<bool>,
 }
 
 fn child<'a, 'i>(node: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
@@ -208,6 +212,12 @@ pub fn notes(doc: &Document) -> (usize, Vec<Note>) {
                             node: el.id(),
                             has_fingering,
                             tuplet,
+                            voice: voice.parse().unwrap_or(1),
+                            stem_up: match text(el, "stem") {
+                                Some("up") => Some(true),
+                                Some("down") => Some(false),
+                                _ => None,
+                            },
                             wedge: el.descendants().any(|d| {
                                 d.has_tag_name("staccatissimo") || d.has_tag_name("spiccato")
                             }),

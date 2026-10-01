@@ -91,6 +91,8 @@ pub struct Details {
     pub digit_boxes: Vec<(usize, u8, [f32; 4], Option<NodeId>)>,
     /// With SCORE_READER_PAIRS: every (stack, chord) pair considered, with its features
     pub pairs: Vec<PairOut>,
+    /// Digits as detected and after the measure number filter: stage, page, digit, box
+    pub stages: Vec<(&'static str, usize, u8, [f32; 4])>,
 }
 
 /// A (stack, chord) pair of a reading
@@ -101,8 +103,12 @@ pub struct PairOut {
     pub stack: usize,
     /// The stack's digits, top to bottom
     pub digits: Vec<u8>,
+    /// Their boxes
+    pub boxes: Vec<[f32; 4]>,
     /// The chord's notes top to bottom (None: head not matched with a note)
     pub notes: Vec<Option<NodeId>>,
+    /// Their heads' boxes
+    pub heads: Vec<[f32; 4]>,
     pub features: Vec<f32>,
 }
 
@@ -131,6 +137,7 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
         ..Default::default()
     };
     let mut heads: Vec<Head> = Vec::new();
+    let mut stages = Vec::new();
     let mut found_pages: Vec<PageFound> = Vec::new();
     let mut system_base = 0;
     // Development: pages written for an external detector, or its detections read back
@@ -222,7 +229,13 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
                 position: st.position(cy),
             });
         }
+        for (d, r) in &page_found.digits {
+            stages.push(("detected", page_no, *d, [r.x0, r.y0, r.x1, r.y1]));
+        }
         drop_numbers(&mut page_found, &heads, &found_staves, &place, interline);
+        for (d, r) in &page_found.digits {
+            stages.push(("numbers", page_no, *d, [r.x0, r.y0, r.x1, r.y1]));
+        }
         report.digits += page_found.digits.len();
         found_pages.push(page_found);
     }
@@ -289,6 +302,7 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
     }
     report.aligned = note_of_head.iter().filter(|n| n.is_some()).count();
     let mut details = Details {
+        stages,
         aligned: note_of_head
             .iter()
             .flatten()
@@ -314,6 +328,10 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
     drop_wedges(&mut found_pages, &heads, &notes, &note_of_head);
 
     let dump_pairs = std::env::var_os("SCORE_READER_PAIRS").is_some();
+    let stem_of_head: Vec<Option<bool>> = note_of_head
+        .iter()
+        .map(|n| n.and_then(|n| notes[n].stem_up))
+        .collect();
     // Digits next to heads, page by page
     let mut fingers = Vec::new();
     let debug = std::env::var_os("SCORE_READER_DEBUG").is_some();
@@ -348,6 +366,7 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
             &chords,
             p.interline,
             per_system,
+            &stem_of_head,
             dump_pairs.then_some(&mut pairs),
         );
         for pair in pairs {
@@ -355,6 +374,22 @@ pub fn read_detailed(score: &str, pages: &[page::Gray]) -> Result<Detailed, Stri
                 page: page_no,
                 stack: pair.id,
                 digits: pair.stack.iter().map(|&d| p.digits[d].0).collect(),
+                boxes: pair
+                    .stack
+                    .iter()
+                    .map(|&d| {
+                        let r = p.digits[d].1;
+                        [r.x0, r.y0, r.x1, r.y1]
+                    })
+                    .collect(),
+                heads: pair
+                    .chord
+                    .iter()
+                    .map(|&h| {
+                        let r = heads[h].rect;
+                        [r.x0, r.y0, r.x1, r.y1]
+                    })
+                    .collect(),
                 notes: pair
                     .chord
                     .iter()
@@ -471,15 +506,30 @@ fn drop_numbers(
                     .map(|&(system, k)| (system, if k == 0 { st.lines[0] } else { f32::MIN }))
             })
     };
+    // Near a head: in its column, a few staff spaces away
+    let near_head = |r: &Rect| {
+        page.heads.iter().any(|&h| {
+            let hr = heads[h].rect;
+            (r.cx() - hr.cx()).abs() < 1.0 * il && (r.cy() - hr.cy()).abs() < 3.5 * il
+        })
+    };
     let keep: Vec<bool> = (0..digits.len())
         .map(|i| {
             let r = digits[i].1;
-            if (0..digits.len()).any(|j| j != i && side_by_side(&r, &digits[j].1)) {
-                return false;
+            let neighbours: Vec<usize> = (0..digits.len())
+                .filter(|&j| j != i && side_by_side(&r, &digits[j].1))
+                .collect();
+            if !neighbours.is_empty() {
+                // Two digits by a note: a finger change ("3 5", "3-5"), its first finger kept;
+                // else a number of several digits (measure number, tempo)
+                let first = neighbours.iter().all(|&j| digits[j].1.cx() > r.cx());
+                return neighbours.len() == 1 && first && near_head(&r);
             }
+            // A measure number: close over the first staff of a system, before its first note
             if let Some((system, top)) = system_top(r.cy())
                 && let Some(&x) = first_head.get(&system)
                 && r.y1 <= top
+                && top - r.y1 < 3.0 * il
                 && r.cx() < x - 0.3 * il
             {
                 return false;
@@ -763,6 +813,7 @@ fn attach(
     chords: &[Vec<usize>],
     il: f32,
     per_system: usize,
+    stem_of_head: &[Option<bool>],
     pairs_out: Option<&mut Vec<Pair>>,
 ) -> Vec<(usize, usize)> {
     let mut links = Vec::new();
@@ -1057,11 +1108,20 @@ fn attach(
                 st
             };
         }
-        let targets: Vec<usize> = if above {
-            ch[..st.len()].to_vec()
-        } else {
-            ch[ch.len() - st.len()..].to_vec()
-        };
+        // Fewer digits than notes: fingering above is for notes with the stem up (the upper
+        // voice), below for stems down, else for the outer notes; notes that have a digit
+        // from the other side last
+        let mut order: Vec<usize> = (0..ch.len()).collect();
+        if !above {
+            order.reverse();
+        }
+        order.sort_by_key(|&k| {
+            let h = ch[k];
+            (used[h], stem_of_head[h] != Some(above))
+        });
+        let mut picked: Vec<usize> = order.into_iter().take(st.len()).collect();
+        picked.sort_unstable();
+        let targets: Vec<usize> = picked.into_iter().map(|k| ch[k]).collect();
         for (d, h) in st.into_iter().zip(targets) {
             if !used[h] {
                 used[h] = true;
