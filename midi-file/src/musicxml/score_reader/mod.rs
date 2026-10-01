@@ -748,31 +748,56 @@ fn found_chords(heads: &[Head], k: usize, pages: &[PageFound]) -> Vec<Vec<usize>
             interline[h] = p.interline;
         }
     }
+    group_chords(heads, &idx, |h| interline[h], |h| (heads[h].system, 0))
+}
+
+/// Heads (sorted by `key`, then left to right) grouped into chords: two heads of one key are
+/// in one chord when one is in the other's column, or right next to it a second away (heads
+/// of a second sit on both sides of the stem, touching; notes of a scale are further apart).
+/// Any head of a chord counts, so a chord with a second is one chord whatever the order.
+fn group_chords(
+    heads: &[Head],
+    idx: &[usize],
+    il: impl Fn(usize) -> f32,
+    key: impl Fn(usize) -> (usize, usize),
+) -> Vec<Vec<usize>> {
+    let mut parent: Vec<usize> = (0..idx.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for i in 0..idx.len() {
+        let a = idx[i];
+        for j in i + 1..idx.len() {
+            let b = idx[j];
+            let il = il(a);
+            let dx = heads[b].rect.cx() - heads[a].rect.cx();
+            if key(b) != key(a) || dx >= 1.35 * il {
+                break;
+            }
+            let second = ((heads[a].position - heads[b].position).abs() - 1.0).abs() <= 0.35;
+            if dx < CHORD_DX * il || second {
+                let (ra, rb) = (root(&mut parent, i), root(&mut parent, j));
+                parent[ra.max(rb)] = ra.min(rb);
+            }
+        }
+    }
     let mut chords: Vec<Vec<usize>> = Vec::new();
-    for h in idx {
-        let join = chords.last().is_some_and(|c| {
-            let first = &heads[c[0]];
-            first.system == heads[h].system && same_chord(heads, c, h, interline[h])
-        });
-        if join {
-            chords.last_mut().unwrap().push(h);
-        } else {
-            chords.push(vec![h]);
+    let mut slot: HashMap<usize, usize> = HashMap::new();
+    for i in 0..idx.len() {
+        let r = root(&mut parent, i);
+        match slot.get(&r) {
+            Some(&c) => chords[c].push(idx[i]),
+            None => {
+                slot.insert(r, chords.len());
+                chords.push(vec![idx[i]]);
+            }
         }
     }
     chords
-}
-
-/// Whether head `h` belongs to the chord `chord` (heads of one staff): in its column, or
-/// right next to it a second away (heads of a second sit on both sides of the stem,
-/// touching; notes of a scale are further apart)
-fn same_chord(heads: &[Head], chord: &[usize], h: usize, il: f32) -> bool {
-    let dx = (heads[h].rect.cx() - heads[chord[0]].rect.cx()).abs();
-    dx < CHORD_DX * il
-        || (dx < 1.35 * il
-            && chord
-                .iter()
-                .any(|&o| ((heads[o].position - heads[h].position).abs() - 1.0).abs() <= 0.35))
 }
 
 /// Chords of written notes of staff `k`, in time order (grace notes on their own)
@@ -808,19 +833,12 @@ fn page_chords(heads: &[Head], on_page: &[usize], interline: f32) -> Vec<Vec<usi
             .cmp(&(heads[b].system, heads[b].staff))
             .then(heads[a].rect.cx().total_cmp(&heads[b].rect.cx()))
     });
-    let mut chords: Vec<Vec<usize>> = Vec::new();
-    for h in idx {
-        let join = chords.last().is_some_and(|c| {
-            let first = &heads[c[0]];
-            (first.system, first.staff) == (heads[h].system, heads[h].staff)
-                && same_chord(heads, c, h, interline)
-        });
-        if join {
-            chords.last_mut().unwrap().push(h);
-        } else {
-            chords.push(vec![h]);
-        }
-    }
+    let mut chords = group_chords(
+        heads,
+        &idx,
+        |_| interline,
+        |h| (heads[h].system, heads[h].staff),
+    );
     for c in &mut chords {
         c.sort_by(|&a, &b| heads[a].rect.cy().total_cmp(&heads[b].rect.cy()));
     }
@@ -876,8 +894,18 @@ fn attach(
         })
     };
     let mut beside = vec![false; digits.len()];
+    // A digit with another right above or below it is part of a stack, not beside a note
+    let stacked = |d: usize| {
+        let r = digits[d].1;
+        digits.iter().enumerate().any(|(o, (_, q))| {
+            o != d && (q.cx() - r.cx()).abs() < 0.6 * il && {
+                let dy = (q.cy() - r.cy()).abs();
+                (0.6 * il..=2.2 * il).contains(&dy)
+            }
+        })
+    };
     for (d, (_, r)) in digits.iter().enumerate() {
-        if in_column(r) {
+        if in_column(r) || stacked(d) {
             continue;
         }
         let head = chords
@@ -1056,33 +1084,46 @@ fn attach(
         let unassigned: f64 = if model.is_some() { -p0.ln() } else { 8.0 };
 
         // Columns: a single note takes one digit (from above or below), a chord one stack from
-        // above and one from below
+        // above and one from below per column of its heads (a chord with a second has its
+        // heads in two columns, and some engravers finger each column on its own)
         let n = stacks.len();
-        let mut slot_of = Vec::with_capacity(chords.len());
         let mut slots: Vec<(usize, Option<bool>)> = Vec::new();
-        let one_slot = std::env::var_os("SCORE_READER_ONE_SLOT").is_some();
-        let two_sided = |c: usize| chords[c].len() > 1 && !one_slot;
+        let mut slots_of: Vec<Vec<usize>> = Vec::with_capacity(chords.len());
+        let two_sided = |c: usize| chords[c].len() > 1;
         for c in 0..chords.len() {
-            slot_of.push(slots.len());
+            let mut mine = Vec::new();
             if !two_sided(c) {
+                mine.push(slots.len());
                 slots.push((c, None));
             } else {
-                slots.push((c, Some(true)));
-                slots.push((c, Some(false)));
+                let mut xs: Vec<f32> = chords[c].iter().map(|&h| heads[h].rect.cx()).collect();
+                xs.sort_by(f32::total_cmp);
+                let columns = 1 + xs.windows(2).filter(|w| w[1] - w[0] > 0.5 * il).count();
+                for side in [true, false] {
+                    for _ in 0..columns {
+                        mine.push(slots.len());
+                        slots.push((c, Some(side)));
+                    }
+                }
             }
+            slots_of.push(mine);
         }
         let real = slots.len();
         let cols = real + n;
         let mut cost = vec![FORBIDDEN; n * cols];
         for (i, cand) in cands.iter().enumerate() {
             for (k, &(score, chord, above, _)) in cand.iter().enumerate() {
-                let slot = slot_of[chord] + usize::from(two_sided(chord) && !above);
                 // More digits than notes: a worse fit
                 let excess = stacks[i].len().saturating_sub(chords[chord].len()) as f64;
-                cost[i * cols + slot] = match model {
+                let c = match model {
                     Some(m) => -(m.prob(&feats[i][k]) as f64).max(1e-4).ln(),
                     None => score as f64 + excess,
                 };
+                for &slot in &slots_of[chord] {
+                    if slots[slot].1.is_none_or(|side| side == above) {
+                        cost[i * cols + slot] = c;
+                    }
+                }
             }
             cost[i * cols + real + i] = unassigned;
         }
@@ -1191,9 +1232,14 @@ fn attach(
         if !above {
             order.reverse();
         }
+        let scx = st.iter().map(|&d| digits[d].1.cx()).sum::<f32>() / st.len() as f32;
         order.sort_by_key(|&k| {
             let h = ch[k];
-            (used[h], stem_of_head[h] != Some(above))
+            (
+                used[h],
+                (heads[h].rect.cx() - scx).abs() > 0.6 * il,
+                stem_of_head[h] != Some(above),
+            )
         });
         let mut picked: Vec<usize> = order.into_iter().take(st.len()).collect();
         picked.sort_unstable();
