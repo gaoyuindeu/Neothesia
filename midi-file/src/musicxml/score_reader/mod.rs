@@ -844,7 +844,7 @@ fn attach(
                 .iter()
                 .map(|&h| heads[h].rect.x1)
                 .fold(f32::MIN, f32::max);
-            if !(hx0 - 0.7 * il..=hx1 + 0.7 * il).contains(&scx) {
+            if !(hx0 - 1.5 * il..=hx1 + 1.5 * il).contains(&scx) {
                 continue;
             }
             let top = heads[ch[0]].rect.y0;
@@ -969,7 +969,7 @@ fn attach(
     let p0: f64 = std::env::var("SCORE_READER_P0")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(0.03);
+        .unwrap_or(0.1);
     let unassigned: f64 = if model.is_some() { -p0.ln() } else { 8.0 };
     const FORBIDDEN: f64 = 1e6;
     // Columns: a single note takes one digit (from above or below), a chord one stack from
