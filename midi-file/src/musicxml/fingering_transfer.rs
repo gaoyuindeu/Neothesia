@@ -14,6 +14,17 @@ use std::{io::Read, ops::Range, path::Path};
 
 use roxmltree::{Document, Node, NodeId};
 
+/// MusicXML files usually start with a DOCTYPE
+fn parse_xml(xml: &str) -> Result<Document<'_>, roxmltree::Error> {
+    Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )
+}
+
 /// What a transfer did
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransferReport {
@@ -308,11 +319,15 @@ fn place_fingers(
             continue;
         };
         let p = sn[i].pitch;
+        // Equal pitches (unisons of two voices): the one at the same place in the chord
         let by_pitch = (0..b.notes.len())
             .filter(|&j| !used[j])
             .map(|j| (j, pitch_similarity(p, tn[b.notes[j]].pitch)))
             .filter(|(_, s)| *s > 0.0)
-            .max_by(|x, y| x.1.total_cmp(&y.1))
+            .max_by(|x, y| {
+                x.1.total_cmp(&y.1)
+                    .then(y.0.abs_diff(rank).cmp(&x.0.abs_diff(rank)))
+            })
             .map(|(j, _)| j);
         // Same number of notes: the same place in the chord is a safe guess
         let target = by_pitch.or((same_size && !used[rank]).then_some(rank));
@@ -366,7 +381,7 @@ fn insertion(xml: &str, doc: &Document, node: NodeId, finger: u8) -> Option<(usi
 /// Copy the fingering of the `sources` (in order, e.g. the movements of a recognized PDF)
 /// into `target`. Returns the new target text.
 pub fn transfer(target: &str, sources: &[String]) -> Result<(String, TransferReport), String> {
-    let target_doc = Document::parse(target).map_err(|e| format!("Target MusicXML: {e}"))?;
+    let target_doc = parse_xml(target).map_err(|e| format!("Target MusicXML: {e}"))?;
     let (tn, t_streams) = collect(&target_doc);
 
     // All sources as one score: later movements continue in time
@@ -374,7 +389,7 @@ pub fn transfer(target: &str, sources: &[String]) -> Result<(String, TransferRep
     let mut s_streams = 0;
     let mut offset = 0.0;
     for source in sources {
-        let doc = Document::parse(source).map_err(|e| format!("Recognized MusicXML: {e}"))?;
+        let doc = parse_xml(source).map_err(|e| format!("Recognized MusicXML: {e}"))?;
         let (notes, streams) = collect(&doc);
         let end = notes.iter().map(|n| n.time).fold(0.0, f64::max);
         sn.extend(notes.into_iter().map(|mut n| {
@@ -540,7 +555,7 @@ fn rewrite_mxl(bytes: &[u8], text: &str) -> Result<Vec<u8>, String> {
 /// The text without `<fingering>` elements (and the `<technical>` / `<notations>` they
 /// leave empty): a score to test the transfer on
 pub fn strip_fingering(xml: &str) -> Result<String, String> {
-    let doc = Document::parse(xml).map_err(|e| e.to_string())?;
+    let doc = parse_xml(xml).map_err(|e| e.to_string())?;
     let only_fingering = |node: Node| {
         node.children()
             .filter(|c| c.is_element())
@@ -575,7 +590,7 @@ pub fn strip_fingering(xml: &str) -> Result<String, String> {
 
 /// Pitch and fingering of every pitched note, in document order
 pub fn note_fingerings(xml: &str) -> Result<Vec<(i32, Option<u8>)>, String> {
-    let doc = Document::parse(xml).map_err(|e| e.to_string())?;
+    let doc = parse_xml(xml).map_err(|e| e.to_string())?;
     let (notes, _) = collect(&doc);
     let mut notes: Vec<&ScoreNote> = notes.iter().collect();
     notes.sort_by_key(|n| n.range.start);

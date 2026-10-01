@@ -74,6 +74,14 @@ fn main() {
         .map(|s| note_fingerings(s).map(|n| n.len()).unwrap_or(0))
         .sum();
 
+    if std::env::var_os("OMR_EVAL_VERBOSE").is_some() {
+        for (i, (t, o)) in truth_notes.iter().zip(&out_notes).enumerate() {
+            if t.1 != o.1 {
+                eprintln!("note {i}: pitch {} truth {:?} got {:?}", t.0, t.1, o.1);
+            }
+        }
+    }
+
     let (mut fingered, mut correct, mut wrong, mut missing, mut extra) = (0, 0, 0, 0, 0);
     for ((_, t), (_, o)) in truth_notes.iter().zip(&out_notes) {
         match (t, o) {
