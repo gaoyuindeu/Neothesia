@@ -972,12 +972,6 @@ impl Workspace {
                 Action::Freeplay,
             ),
             (
-                icon::PDF,
-                self.fingering_import.is_some() || self.pdf_picker.is_some(),
-                ACTIVITY_W * 2.0,
-                Action::ImportFingering,
-            ),
-            (
                 icon::SETTINGS,
                 page == Some(Page::Settings),
                 h - ACTIVITY_W,

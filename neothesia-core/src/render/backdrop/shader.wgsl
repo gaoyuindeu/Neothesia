@@ -61,27 +61,14 @@ fn sample_cover(uv: vec2<f32>) -> vec3<f32> {
     return sum / weight;
 }
 
-fn haze(uv: vec2<f32>, center: vec2<f32>, size: f32) -> f32 {
-    let d = (uv - center) * vec2<f32>(u.screen.x / u.screen.y, 1.0);
-    return exp(-dot(d, d) / (size * size));
-}
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv = in.uv;
-    var color: vec3<f32>;
-
-    if u.has_image > 0.5 {
-        color = sample_cover(uv) * (1.0 - u.dim);
-    } else {
-        // Near black, with a faint cold haze rising from the keyboard and drifting slowly
-        color = u.base_color + vec3<f32>(0.004, 0.005, 0.009);
-
-        let t = u.time * 0.05;
-        let a = haze(uv, vec2<f32>(0.35 + 0.12 * sin(t), 0.92), 0.5);
-        let b = haze(uv, vec2<f32>(0.68 + 0.1 * cos(t * 0.8), 0.95), 0.45);
-        color += vec3<f32>(0.0, 0.012, 0.03) * a + vec3<f32>(0.0, 0.02, 0.035) * b;
+    if u.has_image < 0.5 {
+        // Plain black (or the configured color): the notes and light carry the picture
+        return vec4<f32>(u.base_color, 1.0);
     }
+    var color = sample_cover(uv) * (1.0 - u.dim);
 
     // Vignette
     let v = (uv - vec2<f32>(0.5)) * vec2<f32>(1.1, 1.3);

@@ -86,10 +86,6 @@ fn vs_main(vertex: Vertex, note: NoteInstance) -> VertexOutput {
     return out;
 }
 
-fn hash(x: f32) -> f32 {
-    return fract(sin(x * 12.9898) * 43758.5453);
-}
-
 // Signed distance to a rounded rectangle, negative inside
 fn rounded_box_sdf(frag_coord: vec2<f32>, position: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
     let half = size / 2.0;
@@ -111,7 +107,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Outer glow, thin: a glass bar gives off a soft halo rather than a blob
     if d > 0.5 {
-        let glow = exp(-d / (3.0 * scale)) * 0.3 * lit;
+        let glow = exp(-d / (3.0 * scale)) * 0.35 * lit;
         return vec4<f32>(in.color, glow);
     }
 
@@ -119,39 +115,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let local = frag - in.note_pos;
     let uv = clamp(local / max(in.size, vec2<f32>(1.0)), vec2<f32>(0.0), vec2<f32>(1.0));
 
+    // Two tones along the bar: deep at the trailing (top) end, luminous and paler at the
+    // leading end that reaches the keys first
+    let deep = in.color * vec3<f32>(0.45, 0.6, 0.9);
+    let bright = mix(in.color, vec3<f32>(0.85, 1.0, 1.0), 0.15) * 1.15;
+    var color = mix(deep, bright, smoothstep(0.0, 1.0, uv.y));
+
     // Glass body: clear in the middle, denser and brighter towards the edges
     let half_w = max(min(in.size.x, in.size.y) * 0.5, 1.0);
     let inner = clamp(-d / half_w, 0.0, 1.0);
-    var color = in.color * mix(1.1, 0.45, pow(inner, 0.7));
+    color *= mix(1.25, 0.7, pow(inner, 0.6));
 
-    // Brighter towards the leading (bottom) edge
-    color *= mix(0.8, 1.2, uv.y);
-
-    // Cut crystal: diagonal facets, each catching a different amount of light. The facets
-    // are anchored to the note, so they fall with it
-    let k = (local.y - local.x * 0.9) / max(in.size.x * 2.6, 1.0);
-    let facet = floor(k);
-    let edge = fract(k);
-    let light = hash(facet + in.note_pos.x * 0.37 + in.size.y * 0.013);
-    color = mix(color * 0.7, color * 1.45 + in.color * 0.15 + vec3<f32>(0.06), light);
-    // Thin bright line where two facets meet
-    color += vec3<f32>(0.15) * (1.0 - smoothstep(0.0, 0.06, min(edge, 1.0 - edge)))
-        * step(1.0, in.size.y / max(in.size.x * 2.6, 1.0));
-
-    // Specular streak down the left side of the bar
-    let sx = (uv.x - 0.24) * in.size.x / (1.4 * scale);
-    color += vec3<f32>(0.55) * exp(-sx * sx) * (0.35 + 0.65 * uv.y) * smoothstep(0.0, 0.05, uv.y);
+    // Soft sheen down the left side of the bar
+    let sx = (uv.x - 0.25) * in.size.x / (2.0 * scale);
+    color += vec3<f32>(0.4) * exp(-sx * sx) * (0.3 + 0.7 * uv.y);
 
     // Bright rim just inside the edge
-    let rim = 1.0 - smoothstep(0.0, 1.8 * scale, -d);
-    color = mix(color, mix(in.color, vec3<f32>(1.0), 0.6), rim * 0.75);
+    let rim = 1.0 - smoothstep(0.0, 1.6 * scale, -d);
+    color = mix(color, mix(in.color, vec3<f32>(1.0), 0.65), rim * 0.8);
 
     if playing {
         color = mix(color * 1.3, vec3<f32>(1.0), 0.2);
     }
 
-    // Translucent: the dark backdrop and guidelines show through the middle of the bar
-    let body_alpha = mix(0.95, 0.72, inner);
-    let glow = exp(-max(d, 0.0) / (3.0 * scale)) * 0.3;
+    // Translucent: the dark backdrop shows through the middle of the bar
+    let body_alpha = mix(0.95, 0.75, inner);
+    let glow = exp(-max(d, 0.0) / (3.0 * scale)) * 0.35;
     return vec4<f32>(color, max(fill_alpha * body_alpha, glow));
 }

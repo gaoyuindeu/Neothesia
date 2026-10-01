@@ -95,11 +95,13 @@ fn value_noise(p: vec2<f32>) -> f32 {
 // Puff of smoke: a soft blob broken up by noise, each puff (seed) shaped differently
 fn smoke(uv: vec2<f32>, color: vec4<f32>, seed: f32) -> vec4<f32> {
     let r = length(uv - vec2<f32>(0.5)) * 2.0;
-    let blob = pow(clamp(1.0 - r, 0.0, 1.0), 1.8);
-    let p = uv * 2.2 + vec2<f32>(seed * 37.0, seed * 91.0);
-    let n = value_noise(p) * 0.55 + value_noise(p * 2.03 + 5.0) * 0.3
-        + value_noise(p * 4.1 + 11.0) * 0.15;
-    let wisps = smoothstep(0.25, 0.8, n);
+    let blob = pow(clamp(1.0 - r, 0.0, 1.0), 2.2);
+    // Stretched upwards and warped, so it reads as wisps rather than cloud
+    var p = vec2<f32>(uv.x * 3.0, uv.y * 1.4) + vec2<f32>(seed * 37.0, seed * 91.0);
+    p.x += (value_noise(p * 1.7 + 3.0) - 0.5) * 1.6;
+    let n = value_noise(p) * 0.6 + value_noise(p * 2.03 + 5.0) * 0.4;
+    // Thin ridges of the noise: filaments
+    let wisps = pow(1.0 - abs(n * 2.0 - 1.0), 4.0);
     return vec4<f32>(color.rgb, blob * wisps * color.a);
 }
 

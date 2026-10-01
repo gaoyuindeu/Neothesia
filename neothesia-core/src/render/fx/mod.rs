@@ -257,7 +257,7 @@ impl FxRenderer {
             };
             let sparks = count(20, 30.0);
             let glints = count(3, 4.0);
-            let puffs = count(5, 9.0);
+            let puffs = count(4, 7.0);
 
             for _ in 0..sparks {
                 let speed = if just_pressed {
@@ -299,17 +299,17 @@ impl FxRenderer {
             }
 
             for _ in 0..puffs {
-                let speed = self.rng.range(50.0, 130.0);
-                let angle = self.rng.range(-0.3, 0.3);
+                let speed = self.rng.range(90.0, 200.0);
+                let angle = self.rng.range(-0.25, 0.25);
                 // Smoke is a pale, slightly blue version of the note color
-                let smoke = [0.35, 0.42, 0.5];
+                let smoke = [0.3, 0.4, 0.5];
                 let particle = Particle {
                     kind: ParticleKind::Smoke,
                     seed: self.rng.next() * 0.999,
                     pos: [x + self.rng.range(-0.3, 0.3) * key.width, line_y - 6.0],
                     vel: [angle.sin() * speed, -angle.cos() * speed],
                     age: 0.0,
-                    life: self.rng.range(1.4, 2.8),
+                    life: self.rng.range(1.0, 2.0),
                     size: self.rng.range(key.width * 1.8, key.width * 3.2),
                     color: [0, 1, 2].map(|i| color[i] * 0.55 + smoke[i]),
                     phase: self.rng.range(0.0, std::f32::consts::TAU),
@@ -354,7 +354,7 @@ impl FxRenderer {
 
             // Buoyancy, air drag and a sideways wobble; smoke drifts slowly and curls
             let (lift, drag, wobble, freq) = match p.kind {
-                ParticleKind::Smoke => (25.0, 0.9, 55.0, 1.3),
+                ParticleKind::Smoke => (45.0, 0.7, 70.0, 1.1),
                 _ => (60.0, 1.6, 40.0, 3.0),
             };
             p.vel[1] -= lift * dt;
@@ -394,14 +394,14 @@ impl FxRenderer {
             .filter(|p| p.kind == ParticleKind::Smoke)
         {
             let t = particle.age / particle.life;
-            // Fade in quickly, thin out slowly while it spreads
-            let fade = (t * 8.0).min(1.0) * (1.0 - t) * (1.0 - t);
-            let size = particle.size * (1.0 + 2.2 * t);
+            // Fade in quickly, thin out while it spreads
+            let fade = (t * 6.0).min(1.0) * (1.0 - t) * (1.0 - t) * (1.0 - t);
+            let size = particle.size * (1.0 + 2.6 * t);
             let [r, g, b] = particle.color;
             instances.push(FxInstance {
                 position: [particle.pos[0] - size / 2.0, particle.pos[1] - size / 2.0],
                 size: [size, size],
-                color: [r, g, b, 0.22 * fade],
+                color: [r, g, b, 0.28 * fade],
                 kind: KIND_SMOKE + particle.seed,
             });
         }
