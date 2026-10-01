@@ -769,10 +769,8 @@ fn group_chords(
         }
         i
     }
-    for i in 0..idx.len() {
-        let a = idx[i];
-        for j in i + 1..idx.len() {
-            let b = idx[j];
+    for (i, &a) in idx.iter().enumerate() {
+        for (j, &b) in idx.iter().enumerate().skip(i + 1) {
             let il = il(a);
             let dx = heads[b].rect.cx() - heads[a].rect.cx();
             if key(b) != key(a) || dx >= 1.35 * il {
@@ -787,13 +785,13 @@ fn group_chords(
     }
     let mut chords: Vec<Vec<usize>> = Vec::new();
     let mut slot: HashMap<usize, usize> = HashMap::new();
-    for i in 0..idx.len() {
+    for (i, &h) in idx.iter().enumerate() {
         let r = root(&mut parent, i);
         match slot.get(&r) {
-            Some(&c) => chords[c].push(idx[i]),
+            Some(&c) => chords[c].push(h),
             None => {
                 slot.insert(r, chords.len());
-                chords.push(vec![idx[i]]);
+                chords.push(vec![h]);
             }
         }
     }
@@ -1089,14 +1087,13 @@ fn attach(
         let n = stacks.len();
         let mut slots: Vec<(usize, Option<bool>)> = Vec::new();
         let mut slots_of: Vec<Vec<usize>> = Vec::with_capacity(chords.len());
-        let two_sided = |c: usize| chords[c].len() > 1;
-        for c in 0..chords.len() {
+        for (c, chord) in chords.iter().enumerate() {
             let mut mine = Vec::new();
-            if !two_sided(c) {
+            if chord.len() == 1 {
                 mine.push(slots.len());
                 slots.push((c, None));
             } else {
-                let mut xs: Vec<f32> = chords[c].iter().map(|&h| heads[h].rect.cx()).collect();
+                let mut xs: Vec<f32> = chord.iter().map(|&h| heads[h].rect.cx()).collect();
                 xs.sort_by(f32::total_cmp);
                 let columns = 1 + xs.windows(2).filter(|w| w[1] - w[0] > 0.5 * il).count();
                 for side in [true, false] {
