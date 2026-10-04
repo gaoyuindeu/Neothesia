@@ -82,6 +82,24 @@ pub struct HistoryV1 {
     pub sidebar_visible: bool,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
+    /// The library folders were chosen by the user (an empty list then means none, not
+    /// "show the folder of the last song")
+    #[serde(default)]
+    pub library_edited: bool,
+    /// A–B repeat sections, one per song, most recently used last
+    #[serde(default)]
+    pub loops: Vec<SavedLoop>,
+}
+
+/// The section of a song marked for repeating (A–B)
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SavedLoop {
+    pub song: PathBuf,
+    /// Seconds into the song (without the lead-in)
+    pub start: f32,
+    pub end: Option<f32>,
+    /// Repeating when the song was left
+    pub active: bool,
 }
 
 fn default_sidebar_visible() -> bool {
@@ -105,6 +123,8 @@ impl Default for History {
             audiveris_path: None,
             sidebar_visible: default_sidebar_visible(),
             sidebar_width: default_sidebar_width(),
+            library_edited: false,
+            loops: Vec::new(),
         })
     }
 }

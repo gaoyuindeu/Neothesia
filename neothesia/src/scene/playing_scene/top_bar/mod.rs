@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::{NeothesiaEvent, context::Context, icons};
 
@@ -7,167 +7,71 @@ use super::{
     animation::{Animated, Easing},
 };
 
+/// The row of buttons
+const CONTROLS_H: f32 = 30.0;
+/// The progress bar under it
+const PROGRESS_H: f32 = 24.0;
+/// The bar is always shown: what is under it starts here
+pub const HEIGHT: f32 = CONTROLS_H + PROGRESS_H;
+
+const BAR_BG: [u8; 3] = [37, 35, 42];
+const PILL: [u8; 3] = [67, 67, 67];
+const PILL_HOVER: [u8; 3] = [87, 87, 87];
+const PILL_PRESSED: [u8; 3] = [97, 97, 97];
+const CHIP: [u8; 3] = [52, 50, 58];
+const PROGRESS: [u8; 3] = [56, 145, 255];
+const LOOP: [u8; 3] = [255, 56, 187];
+
+/// Practice speeds, one click each beside the speed control
+const SPEED_PRESETS: [f32; 7] = [0.25, 0.5, 0.7, 1.0, 1.2, 1.5, 2.0];
+
 pub struct TopBar {
-    pub topbar_expand_animation: Animated<bool, Instant>,
-    is_expanded: bool,
-
     settings_animation: Animated<bool, Instant>,
-
     settings_active: bool,
-
-    looper_active: bool,
-    loop_start: Duration,
-    loop_end: Duration,
 }
 
 impl TopBar {
     pub fn new() -> Self {
         Self {
-            topbar_expand_animation: Animated::new(false)
-                .duration(1000.)
-                .easing(Easing::EaseOutExpo)
-                .delay(30.0),
             settings_animation: Animated::new(false)
                 .duration(1000.)
                 .easing(Easing::EaseOutExpo)
                 .delay(30.0),
-
-            is_expanded: false,
             settings_active: false,
-
-            looper_active: false,
-            loop_start: Duration::ZERO,
-            loop_end: Duration::ZERO,
         }
-    }
-
-    pub fn is_looper_active(&self) -> bool {
-        self.looper_active
-    }
-
-    pub fn loop_start_timestamp(&self) -> Duration {
-        self.loop_start
-    }
-
-    pub fn loop_end_timestamp(&self) -> Duration {
-        self.loop_end
     }
 
     #[profiling::function]
     pub fn update(scene: &mut PlayingScene, ctx: &mut Context) {
-        let PlayingScene { top_bar, .. } = scene;
-
-        let window_state = &ctx.window_state;
-
-        let h = 75.0;
-        let cursor = window_state.cursor_logical_position;
-        let is_hovered = cursor.y < h * 1.7
-            && cursor.y >= 0.0
-            && (0.0..window_state.logical_size.width).contains(&cursor.x);
-
-        top_bar.is_expanded = is_hovered;
-        top_bar.is_expanded |= top_bar.settings_active;
-
-        top_bar
-            .topbar_expand_animation
-            .transition(top_bar.is_expanded, ctx.frame_timestamp);
-        top_bar
+        scene
+            .top_bar
             .settings_animation
-            .transition(top_bar.settings_active, ctx.frame_timestamp);
+            .transition(scene.top_bar.settings_active, ctx.frame_timestamp);
 
-        Self::ui(scene, ctx);
-    }
-
-    #[profiling::function]
-    pub fn ui(this: &mut PlayingScene, ctx: &mut Context) {
-        let mut ui = std::mem::replace(&mut this.nuon, nuon::Ui::new());
-
-        // POC For sheet music symbol rendering
-        if false {
-            nuon::translate().y(100.0).build(&mut ui, |ui| {
-                let spacing = 15.0;
-                let half_spacing = spacing / 2.0;
-                let y = 50.0;
-                let x = 40.0;
-
-                let color = [0; 3];
-
-                nuon::quad()
-                    .color([255; 3])
-                    .pos(0.0, 0.0)
-                    .size(250.0, 130.0)
-                    .border_radius([0.0, 10.0, 10.0, 0.0])
-                    .build(ui);
-
-                // Staves
-                for id in 0..5 {
-                    nuon::quad()
-                        .y(y - id as f32 * spacing + 39.0)
-                        .height(1.0)
-                        .width(250.0)
-                        .color(color)
-                        .build(ui);
-                }
-
-                let base = || half_spacing * 4.0;
-                let pitch_y = |pitch: u8| base() - half_spacing * pitch as f32;
-
-                nuon::leland()
-                    .text(icons::sheet::g_clef())
-                    .color(color)
-                    .x(x)
-                    .y(y)
-                    .build(ui);
-
-                let whole = icons::sheet::notehead_whole();
-
-                for pitch in 0..10 {
-                    let y = y + pitch_y(pitch);
-
-                    nuon::leland()
-                        .text(whole)
-                        .color(color)
-                        .x(x + 60.0 + 22.0 * (pitch % 2) as f32)
-                        .y(y)
-                        .build(ui);
-                }
-            });
-        }
-
-        nuon::translate()
-            .y(this.top_bar.topbar_expand_animation.animate_bool(
-                -75.0 + 5.0,
-                0.0,
-                ctx.frame_timestamp,
-            ))
-            .build(&mut ui, |ui| {
-                Self::panel(this, ctx, ui);
-            });
-
-        this.nuon = ui;
+        let mut ui = std::mem::replace(&mut scene.nuon, nuon::Ui::new());
+        Self::panel(scene, ctx, &mut ui);
+        scene.nuon = ui;
     }
 
     fn panel(this: &mut PlayingScene, ctx: &mut Context, ui: &mut nuon::Ui) {
         let win_w = ctx.window_state.logical_size.width;
 
-        nuon::quad()
-            .size(win_w, 30.0 + 45.0)
-            .color([37, 35, 42])
-            .build(ui);
+        nuon::quad().size(win_w, HEIGHT).color(BAR_BG).build(ui);
 
         Self::panel_left(this, ctx, ui);
-        Self::panel_center(this, ctx, ui);
+        Self::panel_center(ctx, ui);
         Self::panel_right(this, ctx, ui);
         Self::settings_panel(this, ctx, ui);
 
-        // ProggressBar
-        nuon::translate().y(30.0).build(ui, |ui| {
-            Self::proggress_bar(this, ctx, ui);
+        nuon::translate().y(CONTROLS_H).build(ui, |ui| {
+            Self::progress_bar(this, ctx, ui);
         });
     }
 
     fn button() -> nuon::Button {
-        nuon::button().size(30.0, 30.0).border_radius([5.0; 4])
+        nuon::button()
+            .size(CONTROLS_H, CONTROLS_H)
+            .border_radius([5.0; 4])
     }
 
     fn panel_left(this: &mut PlayingScene, ctx: &mut Context, ui: &mut nuon::Ui) {
@@ -178,23 +82,44 @@ impl TopBar {
         }
     }
 
-    fn panel_center(_this: &mut PlayingScene, ctx: &mut Context, ui: &mut nuon::Ui) {
+    /// The speed: − / percentage / +, and the preset speeds beside it
+    fn panel_center(ctx: &mut Context, ui: &mut nuon::Ui) {
+        const BUTTON_W: f32 = 32.0;
+        const LABEL_W: f32 = 56.0;
+        const CHIP_W: f32 = 40.0;
+        const CHIP_GAP: f32 = 3.0;
+        const GROUP_GAP: f32 = 10.0;
+        const H: f32 = 20.0;
+
         let win_w = ctx.window_state.logical_size.width;
-        let button_w = 35.0;
-        let label_w = 60.0;
-        let pill_w = button_w * 2.0 + label_w;
+        let pill_w = BUTTON_W * 2.0 + LABEL_W;
+        let chips_w =
+            SPEED_PRESETS.len() as f32 * CHIP_W + (SPEED_PRESETS.len() - 1) as f32 * CHIP_GAP;
+        // Between the back button and the three buttons on the right; centered when it fits
+        let left = CONTROLS_H + 10.0;
+        let right = win_w - 3.0 * CONTROLS_H - 10.0;
+        let show_chips = pill_w + GROUP_GAP + chips_w <= right - left;
+        let group_w = if show_chips {
+            pill_w + GROUP_GAP + chips_w
+        } else {
+            pill_w
+        };
+        let group_x = (win_w / 2.0 - group_w / 2.0)
+            .min(right - group_w)
+            .max(left)
+            .round();
 
         let speed = ctx.config.speed_multiplier();
 
         nuon::translate()
-            .x(win_w / 2.0 - pill_w / 2.0)
-            .y(5.0)
+            .x(group_x)
+            .y((CONTROLS_H - H) / 2.0)
             .build(ui, |ui| {
                 if nuon::button()
-                    .size(button_w, 20.0)
-                    .color([67, 67, 67])
-                    .hover_color([87, 87, 87])
-                    .preseed_color([97, 97, 97])
+                    .size(BUTTON_W, H)
+                    .color(PILL)
+                    .hover_color(PILL_HOVER)
+                    .preseed_color(PILL_PRESSED)
                     .border_radius([10.0, 0.0, 0.0, 10.0])
                     .icon(icons::minus_icon())
                     .build(ui)
@@ -202,43 +127,78 @@ impl TopBar {
                     ctx.config.set_speed_multiplier((speed - 0.05).max(0.05));
                 }
 
-                // Clicking the percentage cycles through common practice speeds
+                // Clicking the percentage goes to the next preset
                 let presets = nuon::click_area("SpeedPresets")
-                    .x(button_w)
-                    .size(label_w, 20.0)
+                    .x(BUTTON_W)
+                    .size(LABEL_W, H)
                     .build(ui);
                 if presets.is_clicked() {
                     ctx.config.set_speed_multiplier(next_speed_preset(speed));
                 }
-
                 nuon::quad()
-                    .x(button_w)
-                    .size(label_w, 20.0)
+                    .x(BUTTON_W)
+                    .size(LABEL_W, H)
                     .color(if presets.is_hovered() || presets.is_pressed() {
-                        [87, 87, 87]
+                        PILL_HOVER
                     } else {
-                        [67, 67, 67]
+                        PILL
                     })
                     .build(ui);
-
                 nuon::label()
-                    .text(format!("{}%", (speed * 100.0).round()))
+                    .text(format_speed(speed))
                     .bold(true)
-                    .x(button_w)
-                    .size(label_w, 20.0)
+                    .x(BUTTON_W)
+                    .size(LABEL_W, H)
                     .build(ui);
 
                 if nuon::button()
-                    .size(button_w, 20.0)
-                    .x(button_w + label_w)
-                    .color([67, 67, 67])
-                    .hover_color([87, 87, 87])
-                    .preseed_color([97, 97, 97])
+                    .size(BUTTON_W, H)
+                    .x(BUTTON_W + LABEL_W)
+                    .color(PILL)
+                    .hover_color(PILL_HOVER)
+                    .preseed_color(PILL_PRESSED)
                     .border_radius([0.0, 10.0, 10.0, 0.0])
                     .icon(icons::plus_icon())
                     .build(ui)
                 {
                     ctx.config.set_speed_multiplier(speed + 0.05);
+                }
+
+                if !show_chips {
+                    return;
+                }
+                for (i, preset) in SPEED_PRESETS.into_iter().enumerate() {
+                    let x = pill_w + GROUP_GAP + i as f32 * (CHIP_W + CHIP_GAP);
+                    let chip = nuon::click_area(("SpeedPreset", i))
+                        .x(x)
+                        .size(CHIP_W, H)
+                        .build(ui);
+                    let selected = (speed - preset).abs() < 0.001;
+                    let color = if selected {
+                        PROGRESS
+                    } else if chip.is_pressed() {
+                        PILL_PRESSED
+                    } else if chip.is_hovered() {
+                        PILL_HOVER
+                    } else {
+                        CHIP
+                    };
+                    nuon::quad()
+                        .x(x)
+                        .size(CHIP_W, H)
+                        .color(color)
+                        .border_radius([10.0; 4])
+                        .build(ui);
+                    nuon::label()
+                        .text(format_speed(preset))
+                        .bold(selected)
+                        .font_size(12.0)
+                        .x(x)
+                        .size(CHIP_W, H)
+                        .build(ui);
+                    if chip.is_clicked() {
+                        ctx.config.set_speed_multiplier(preset);
+                    }
                 }
             });
     }
@@ -247,7 +207,7 @@ impl TopBar {
         nuon::translate()
             .x(ctx.window_state.logical_size.width)
             .build(ui, |ui| {
-                nuon::translate().x(-30.0).add_to_current(ui);
+                nuon::translate().x(-CONTROLS_H).add_to_current(ui);
 
                 if Self::button()
                     .icon(if this.top_bar.settings_active {
@@ -260,22 +220,31 @@ impl TopBar {
                     this.top_bar.settings_active = !this.top_bar.settings_active;
                 }
 
-                nuon::translate().x(-30.0).add_to_current(ui);
+                nuon::translate().x(-CONTROLS_H).add_to_current(ui);
 
-                if Self::button().icon(icons::repeat_icon()).build(ui) {
-                    this.top_bar.looper_active = !this.top_bar.looper_active;
-
-                    // Looper enabled for the first time
-                    if this.top_bar.looper_active
-                        && this.top_bar.loop_start.is_zero()
-                        && this.top_bar.loop_end.is_zero()
+                // A–B repeat on / off (A and B keys mark the section)
+                let mut repeat = Self::button().icon(icons::repeat_icon());
+                if this.looper.is_active() {
+                    repeat = repeat
+                        .color([120, 36, 92])
+                        .hover_color([150, 46, 116])
+                        .preseed_color([170, 52, 132]);
+                }
+                if repeat.build(ui) {
+                    let now = this.player.time();
+                    this.looper.toggle(now, this.player.length());
+                    if let (true, Some(start), Some(end)) = (
+                        this.looper.is_active(),
+                        this.looper.start(),
+                        this.looper.end(),
+                    ) && !(start..=end).contains(&now)
                     {
-                        this.top_bar.loop_start = this.player.time();
-                        this.top_bar.loop_end = this.player.time() + Duration::from_secs(5);
+                        this.jump_to(start);
                     }
+                    this.looper.save(ctx);
                 }
 
-                nuon::translate().x(-30.0).add_to_current(ui);
+                nuon::translate().x(-CONTROLS_H).add_to_current(ui);
 
                 if Self::button()
                     .icon(if this.player.is_paused() {
@@ -304,14 +273,14 @@ impl TopBar {
 
         nuon::translate()
             .x(ctx.window_state.logical_size.width - offset)
-            .y(75.0)
+            .y(HEIGHT)
             .build(ui, |ui| {
                 // Gap
                 nuon::translate().y(5.0).add_to_current(ui);
 
                 nuon::quad()
                     .size(width, 208.0)
-                    .color([37, 35, 42])
+                    .color(BAR_BG)
                     .border_radius([10.0, 0.0, 0.0, 10.0])
                     .build(ui);
 
@@ -353,18 +322,19 @@ impl TopBar {
             });
     }
 
-    fn proggress_bar(this: &mut PlayingScene, ctx: &mut Context, ui: &mut nuon::Ui) {
-        let h = 45.0;
+    fn progress_bar(this: &mut PlayingScene, ctx: &mut Context, ui: &mut nuon::Ui) {
+        let h = PROGRESS_H;
         let w = ctx.window_state.logical_size.width;
 
-        let render_looper = Self::proggress_bar_looper(this, ctx, ui, w, h);
+        // The A–B handles sit on the bar: they take the mouse before it does
+        let render_looper = Self::progress_bar_looper(this, ctx, ui, w, h);
 
-        Self::proggress_bar_bg(this, ctx, ui, w, h);
+        Self::progress_bar_bg(this, ctx, ui, w, h);
 
         render_looper(ui);
     }
 
-    fn proggress_bar_bg(
+    fn progress_bar_bg(
         this: &mut PlayingScene,
         ctx: &mut Context,
         ui: &mut nuon::Ui,
@@ -392,17 +362,12 @@ impl TopBar {
             nuon::ClickAreaEvent::Idle { .. } => {}
         }
 
-        nuon::quad()
-            .size(progress_w, h)
-            .color([56, 145, 255])
-            .build(ui);
+        nuon::quad().size(progress_w, h).color(PROGRESS).build(ui);
 
+        let length = this.player.length().as_secs_f32();
+        let start = this.player.leed_in().as_secs_f32() / length;
         for m in this.player.song().file.measures.iter() {
-            let length = this.player.length().as_secs_f32();
-            let start = this.player.leed_in().as_secs_f32() / length;
-            let measure = m.as_secs_f32() / length;
-
-            let x = (start + measure) * w;
+            let x = (start + m.as_secs_f32() / length) * w;
 
             let light_measure = nuon::Color::new(1.0, 1.0, 1.0, 0.5);
             let dark_measure = nuon::Color::new(0.4, 0.4, 0.4, 1.0);
@@ -417,103 +382,111 @@ impl TopBar {
         }
     }
 
-    fn proggress_bar_looper<'a>(
+    /// The A and B marks: draggable, with the section between them tinted (strongly while
+    /// it repeats)
+    fn progress_bar_looper<'a>(
         this: &mut PlayingScene,
         ctx: &mut Context,
         ui: &mut nuon::Ui,
         w: f32,
         h: f32,
     ) -> impl FnOnce(&mut nuon::Ui) + 'a {
-        let loop_start = this.top_bar.loop_start;
-        let loop_start = this.player.time_to_percentage(&loop_start) * w;
+        const GRAB_W: f32 = 12.0;
+        const LINE_W: f32 = 3.0;
 
-        let loop_end = this.top_bar.loop_end;
-        let loop_end = this.player.time_to_percentage(&loop_end) * w;
+        let to_x = |time| this.player.time_to_percentage(&time) * w;
+        let start_x = this.looper.start().map(to_x);
+        let end_x = this.looper.end().map(to_x);
 
-        let loop_h = h + 10.0;
-
-        let looper_active = this.top_bar.looper_active;
-
-        let (loop_start_ev, loop_end_ev) = if looper_active {
-            let loop_start_ev = nuon::click_area("LooperStart")
-                .x(loop_start)
-                .width(5.0)
-                .height(loop_h)
-                .build(ui);
-            let loop_end_ev = nuon::click_area("LooperEnd")
-                .x(loop_end)
-                .width(5.0)
-                .height(loop_h)
-                .build(ui);
-            (loop_start_ev, loop_end_ev)
-        } else {
-            (nuon::ClickAreaEvent::null(), nuon::ClickAreaEvent::null())
+        let handle = |id: &'static str, x: Option<f32>, ui: &mut nuon::Ui| match x {
+            Some(x) => nuon::click_area(id)
+                .x(x - GRAB_W / 2.0)
+                .size(GRAB_W, h)
+                .build(ui),
+            None => nuon::ClickAreaEvent::null(),
         };
+        let start_ev = handle("LooperStart", start_x, ui);
+        let end_ev = handle("LooperEnd", end_x, ui);
 
-        if loop_start_ev.is_pressed() {
+        let cursor_time = || {
             let x = ctx.window_state.cursor_logical_position.x;
-            let w = ctx.window_state.logical_size.width;
-            let p = x / w;
-
-            if p * w < loop_end - 10.0 {
-                this.top_bar.loop_start = this.player.percentage_to_time(p);
-            }
+            this.player.percentage_to_time((x / w).clamp(0.0, 1.0))
+        };
+        if start_ev.is_pressed() {
+            let time = cursor_time();
+            this.looper.drag_start(time);
+        }
+        if end_ev.is_pressed() {
+            let time = cursor_time();
+            this.looper.drag_end(time);
+        }
+        if start_ev.is_press_end() || end_ev.is_press_end() {
+            this.looper.save(ctx);
         }
 
-        if loop_end_ev.is_pressed() {
-            let x = ctx.window_state.cursor_logical_position.x;
-            let w = ctx.window_state.logical_size.width;
-            let p = x / w;
+        let start_x = this.looper.start().map(to_x);
+        let end_x = this.looper.end().map(to_x);
+        let active = this.looper.is_active();
 
-            if p * w > loop_start + 10.0 {
-                this.top_bar.loop_end = this.player.percentage_to_time(p);
-            }
-        }
-
-        // render
         move |ui| {
-            if !looper_active {
-                return;
+            if let (Some(start), Some(end)) = (start_x, end_x) {
+                let [r, g, b] = LOOP;
+                nuon::quad()
+                    .x(start)
+                    .width(end - start)
+                    .height(h)
+                    .color([r, g, b, if active { 90 } else { 40 }])
+                    .build(ui);
             }
 
-            let color = [255, 56, 187];
-            let white = [255; 3];
-
-            nuon::quad()
-                .x(loop_start)
-                .width(loop_end - loop_start)
-                .height(loop_h)
-                .color([255, 56, 187, 90])
-                .build(ui);
-
-            nuon::quad()
-                .x(loop_start)
-                .width(5.0)
-                .height(loop_h)
-                .color(
-                    if loop_start_ev.is_hovered() || loop_start_ev.is_pressed() {
-                        white
-                    } else {
-                        color
-                    },
-                )
-                .build(ui);
-
-            nuon::quad()
-                .x(loop_end)
-                .width(5.0)
-                .height(loop_h)
-                .color(if loop_end_ev.is_hovered() || loop_end_ev.is_pressed() {
-                    white
+            // The letters sit outside the section, so a short one keeps both readable
+            let marks = [(start_x, start_ev, "A", -1.0), (end_x, end_ev, "B", 1.0)];
+            for (x, ev, name, side) in marks {
+                let Some(x) = x else {
+                    continue;
+                };
+                let hot = ev.is_hovered() || ev.is_pressed();
+                let color = if hot { [255; 3] } else { LOOP };
+                nuon::quad()
+                    .x(x - LINE_W / 2.0)
+                    .width(LINE_W)
+                    .height(h)
+                    .color(color)
+                    .build(ui);
+                let label_w = 12.0;
+                let label_x = if side > 0.0 {
+                    x + LINE_W / 2.0 + 1.0
                 } else {
-                    color
-                })
-                .build(ui);
+                    x - LINE_W / 2.0 - 1.0 - label_w
+                };
+                nuon::quad()
+                    .x(label_x)
+                    .width(label_w)
+                    .height(13.0)
+                    .color(color)
+                    .border_radius(if side > 0.0 {
+                        [0.0, 3.0, 3.0, 0.0]
+                    } else {
+                        [3.0, 0.0, 0.0, 3.0]
+                    })
+                    .build(ui);
+                nuon::label()
+                    .text(name)
+                    .bold(true)
+                    .font_size(10.0)
+                    .color([20, 18, 24])
+                    .x(label_x)
+                    .size(label_w, 13.0)
+                    .build(ui);
+            }
         }
     }
 }
 
-const SPEED_PRESETS: [f32; 5] = [0.25, 0.5, 0.75, 1.0, 1.25];
+/// "70%", "120%"
+fn format_speed(speed: f32) -> String {
+    format!("{}%", (speed * 100.0).round())
+}
 
 /// The next preset above `speed`, wrapping around to the slowest one
 fn next_speed_preset(speed: f32) -> f32 {

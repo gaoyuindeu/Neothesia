@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 mod model;
 
-pub use model::ColorSchemaV1;
 use model::{
     AppearanceConfig, AppearanceConfigV1, DevicesConfig, DevicesConfigV1, History, HistoryV1,
     LayoutConfig, LayoutConfigV1, Model, PcKeyboardConfig, PcKeyboardConfigV1, PlaybackConfig,
     PlaybackConfigV1, SynthConfig, SynthConfigV1, WaterfallConfig, WaterfallConfigV1,
 };
+pub use model::{ColorSchemaV1, SavedLoop};
 
 fn ron_options() -> ron::Options {
     ron::Options::default()
@@ -195,6 +195,30 @@ impl Config {
 
     pub fn set_library_folders(&mut self, folders: Vec<PathBuf>) {
         self.history.library_folders = folders;
+        self.history.library_edited = true;
+    }
+
+    /// The user chose the library folders (possibly none)
+    pub fn library_edited(&self) -> bool {
+        self.history.library_edited
+    }
+
+    /// The A–B section saved for `song`
+    pub fn song_loop(&self, song: &std::path::Path) -> Option<&SavedLoop> {
+        self.history.loops.iter().find(|l| l.song == song)
+    }
+
+    /// Save (or with None forget) the A–B section of `song`
+    pub fn set_song_loop(&mut self, song: &std::path::Path, value: Option<SavedLoop>) {
+        const MAX_SONGS: usize = 200;
+        let loops = &mut self.history.loops;
+        loops.retain(|l| l.song != song);
+        if let Some(value) = value {
+            loops.push(value);
+            if loops.len() > MAX_SONGS {
+                loops.drain(..loops.len() - MAX_SONGS);
+            }
+        }
     }
 
     pub fn audiveris_path(&self) -> Option<&std::path::Path> {

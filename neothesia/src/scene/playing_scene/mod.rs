@@ -5,8 +5,8 @@ use neothesia_core::render::{
 };
 use std::time::Duration;
 use winit::{
-    event::WindowEvent,
-    keyboard::{Key, NamedKey},
+    event::{ElementState, KeyEvent, WindowEvent},
+    keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
 };
 
 use self::top_bar::TopBar;
@@ -33,7 +33,11 @@ mod toast_manager;
 use toast_manager::ToastManager;
 
 mod animation;
+mod looper;
+use looper::Looper;
+
 mod top_bar;
+pub use top_bar::HEIGHT as TOP_BAR_HEIGHT;
 
 pub struct PlayingScene {
     keyboard: Keyboard,
@@ -62,6 +66,7 @@ pub struct PlayingScene {
     deduced_chord_name: String,
 
     top_bar: TopBar,
+    looper: Looper,
 }
 
 impl PlayingScene {
@@ -127,7 +132,7 @@ impl PlayingScene {
             )
         });
 
-        let player = MidiPlayer::new(
+        let mut player = MidiPlayer::new(
             ctx.output_manager.connection().clone(),
             song,
             keyboard_layout.range.clone(),
@@ -136,6 +141,12 @@ impl PlayingScene {
         waterfall.update(player.time_without_lead_in());
 
         let step_controller = StepController::new(player.song(), *player.leed_in());
+        let looper = Looper::new(ctx, *player.leed_in());
+        // Back to the section that was being repeated
+        if let (true, Some(start)) = (looper.is_active(), looper.start()) {
+            player.set_time(start);
+            waterfall.update(player.time_without_lead_in());
+        }
 
         let quad_renderer_bg = ctx.quad_renderer_factory.new_renderer();
         let quad_renderer_fg = ctx.quad_renderer_factory.new_renderer();
@@ -216,6 +227,7 @@ impl PlayingScene {
             deduced_chord_name: String::new(),
 
             top_bar: TopBar::new(),
+            looper,
         }
     }
 
@@ -265,11 +277,8 @@ impl PlayingScene {
 
     #[profiling::function]
     fn update_midi_player(&mut self, ctx: &Context, delta: Duration) -> f32 {
-        if self.top_bar.is_looper_active() && self.player.time() > self.top_bar.loop_end_timestamp()
-        {
-            self.player.set_time(self.top_bar.loop_start_timestamp());
-            self.keyboard.reset_notes();
-            self.step_controller.cancel_glide();
+        if let Some(start) = self.looper.wrap(self.player.time()) {
+            self.jump_to(start);
         }
 
         if self.step_controller.is_enabled() {
@@ -286,6 +295,91 @@ impl PlayingScene {
         }
 
         self.player.time_without_lead_in() + ctx.config.animation_offset()
+    }
+
+    fn jump_to(&mut self, time: Duration) {
+        self.player.set_time(time);
+        self.keyboard.reset_notes();
+        self.step_controller.cancel_glide();
+    }
+
+    /// A marks where the section starts, B where it ends (and starts repeating it),
+    /// Delete / Backspace forgets both. True when the key was one of these.
+    fn loop_keys(&mut self, ctx: &mut Context, event: &WindowEvent) -> bool {
+        let WindowEvent::KeyboardInput {
+            event:
+                KeyEvent {
+                    state,
+                    physical_key: PhysicalKey::Code(code),
+                    repeat,
+                    ..
+                },
+            ..
+        } = event
+        else {
+            return false;
+        };
+        let modifiers = ctx.window_state.modifiers_state;
+        if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() {
+            return false;
+        }
+        if !matches!(
+            code,
+            KeyCode::KeyA | KeyCode::KeyB | KeyCode::Delete | KeyCode::Backspace
+        ) {
+            return false;
+        }
+        if *state != ElementState::Pressed || *repeat {
+            return true;
+        }
+
+        let lead_in = *self.player.leed_in();
+        let now = self.player.time();
+        match code {
+            KeyCode::KeyA => {
+                let playing = !self.player.is_paused() && !self.step_controller.is_enabled();
+                let start = looper::snap_start(
+                    self.player.song(),
+                    lead_in,
+                    now,
+                    ctx.config.speed_multiplier(),
+                    playing,
+                );
+                self.looper.set_start(start);
+                self.toast_manager.toast(match self.looper.end() {
+                    Some(end) => format!(
+                        "A: {} \u{2014} section {} \u{2013} {}",
+                        looper::format_time(start, lead_in),
+                        looper::format_time(start, lead_in),
+                        looper::format_time(end, lead_in)
+                    ),
+                    None => format!(
+                        "A: {} \u{2014} press B where the section ends",
+                        looper::format_time(start, lead_in)
+                    ),
+                });
+            }
+            KeyCode::KeyB => match self.looper.set_end(now) {
+                Some(start) => {
+                    self.jump_to(start);
+                    let end = self.looper.end().unwrap_or(now);
+                    self.toast_manager.toast(format!(
+                        "Repeating {} \u{2013} {} \u{2003}(Delete: clear)",
+                        looper::format_time(start, lead_in),
+                        looper::format_time(end, lead_in)
+                    ));
+                }
+                None => self.toast_manager.toast("B has to be after A"),
+            },
+            _ => {
+                if self.looper.start().is_some() {
+                    self.looper.clear();
+                    self.toast_manager.toast("A\u{2013}B cleared");
+                }
+            }
+        }
+        self.looper.save(ctx);
+        true
     }
 
     #[profiling::function]
@@ -344,7 +438,7 @@ impl Scene for PlayingScene {
                 song_time,
                 (
                     0.0,
-                    0.0,
+                    TOP_BAR_HEIGHT,
                     logical.width,
                     SheetRenderer::height_for(staff_space),
                 ),
@@ -378,12 +472,8 @@ impl Scene for PlayingScene {
         }
 
         #[cfg(debug_assertions)]
-        self.text_renderer.queue_fps(
-            ctx.fps_ticker.avg(),
-            self.top_bar
-                .topbar_expand_animation
-                .animate_bool(5.0, 80.0, ctx.frame_timestamp),
-        );
+        self.text_renderer
+            .queue_fps(ctx.fps_ticker.avg(), TOP_BAR_HEIGHT + 5.0);
         self.text_renderer.update(
             ctx.window_state.physical_size,
             ctx.window_state.scale_factor as f32,
@@ -468,7 +558,9 @@ impl Scene for PlayingScene {
         }
 
         handle_settings_input(ctx, &mut self.toast_manager, &mut self.waterfall, event);
-        super::handle_pc_keyboard_to_midi_event(ctx, event);
+        if !self.loop_keys(ctx, event) {
+            super::handle_pc_keyboard_to_midi_event(ctx, event);
+        }
         super::handle_mouse_to_midi_event(
             &mut self.keyboard,
             &mut self.mouse_to_midi_state,

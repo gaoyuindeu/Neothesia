@@ -100,6 +100,8 @@ struct FingeringImport {
 
 struct Loading {
     path: PathBuf,
+    /// Start playing once it is open (the user chose the song)
+    play: bool,
     rx: mpsc::Receiver<Result<midi_file::MidiFile, String>>,
 }
 
@@ -170,7 +172,7 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(ctx: &mut Context) -> Self {
-        let folders = if ctx.config.library_folders().is_empty() {
+        let folders = if ctx.config.library_folders().is_empty() && !ctx.config.library_edited() {
             library::default_folders(ctx.config.last_opened_song().map(PathBuf::as_path))
         } else {
             ctx.config.library_folders().to_vec()
@@ -225,7 +227,7 @@ impl Workspace {
         if let Some(path) = start {
             this.library.reveal(&path);
             this.selected = Some(path.clone());
-            this.load(path);
+            this.load(path, false);
         }
         this
     }
@@ -264,8 +266,8 @@ impl Workspace {
         self.window_px = [full.width.max(1), full.height.max(1)];
     }
 
-    /// Read a song file on another thread; it opens when ready
-    fn load(&mut self, path: PathBuf) {
+    /// Read a song file on another thread; it opens when ready, playing or paused
+    fn load(&mut self, path: PathBuf, play: bool) {
         if self.loading.as_ref().is_some_and(|l| l.path == path) {
             return;
         }
@@ -278,7 +280,7 @@ impl Workspace {
             })
             .ok();
         self.status = Status::Info(format!("Loading {}\u{2026}", file_name(&path)));
-        self.loading = Some(Loading { path, rx });
+        self.loading = Some(Loading { path, play, rx });
     }
 
     /// The MusicXML file fingering read from a PDF goes into: the open score, or the
@@ -367,7 +369,7 @@ impl Workspace {
                 if report.fingers > 0
                     && let Some(path) = self.song_path.clone()
                 {
-                    self.load(path);
+                    self.load(path, false);
                 }
             }
             Err(err) => {
@@ -386,7 +388,7 @@ impl Workspace {
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => Err("loader stopped".into()),
         };
-        let path = self.loading.take().unwrap().path;
+        let Loading { path, play, .. } = self.loading.take().unwrap();
         match result {
             Ok(file) => {
                 ctx.config.set_last_opened_song(Some(path.clone()));
@@ -396,7 +398,7 @@ impl Workspace {
                     "{} \u{2014} Neothesia",
                     path.file_stem().unwrap_or_default().to_string_lossy()
                 ));
-                let play = std::mem::take(&mut self.start_playing);
+                let play = play || std::mem::take(&mut self.start_playing);
                 self.open_song(ctx, Song::new(file), play);
                 // Keys go to the player now (arrows step / rewind)
                 self.library_focused = false;
@@ -554,7 +556,7 @@ impl Workspace {
                     self.last_click = None;
                 } else if double {
                     self.last_click = None;
-                    self.load(path);
+                    self.load(path, true);
                 } else {
                     self.last_click = Some((path, Instant::now()));
                 }
@@ -663,8 +665,16 @@ impl Workspace {
                     self.library_focused = self.panel_visible;
                     return;
                 }
-                if self.library_focused && self.panel_visible && self.tree_key(logical_key) {
-                    return;
+                if self.library_focused && self.panel_visible {
+                    if matches!(logical_key, Key::Named(NamedKey::Delete))
+                        && let Some(root) = self.selected_root()
+                    {
+                        self.apply(ctx, Action::RemoveRoot(root));
+                        return;
+                    }
+                    if self.tree_key(logical_key) {
+                        return;
+                    }
                 }
             }
             WindowEvent::KeyboardInput {
@@ -683,7 +693,7 @@ impl Workspace {
                     self.add_folder(ctx, path.clone());
                 } else if library::is_song_file(path) {
                     self.selected = Some(path.clone());
-                    self.load(path.clone());
+                    self.load(path.clone(), true);
                 }
                 return;
             }
@@ -691,6 +701,15 @@ impl Workspace {
         }
 
         self.main.scene().window_event(ctx, event);
+    }
+
+    /// The selected row, when it is a folder the user added
+    fn selected_root(&self) -> Option<PathBuf> {
+        let selected = self.selected.as_ref()?;
+        self.library
+            .root_paths()
+            .into_iter()
+            .find(|root| root == selected)
     }
 
     /// Arrow keys and Enter in the tree; true when used
@@ -738,7 +757,7 @@ impl Workspace {
                 if row.is_dir {
                     self.library.toggle(&row.path);
                 } else {
-                    self.load(row.path.clone());
+                    self.load(row.path.clone(), true);
                 }
             }
             _ => {}
@@ -823,7 +842,7 @@ impl Workspace {
         const ROW: f32 = 28.0;
         const W: f32 = 196.0;
         let x = self.sidebar_w() + view.width - W - 12.0;
-        let y = sheet_h + 10.0;
+        let y = crate::scene::playing_scene::TOP_BAR_HEIGHT + sheet_h + 10.0;
         let h = ROW * tracks.len() as f32 + 8.0 + if pdf_row { ROW + 4.0 } else { 0.0 };
         self.hands_rect = Some([x, y, W, h]);
 
@@ -1138,17 +1157,29 @@ impl Workspace {
 
     fn tree_row(&self, ui: &mut nuon::Ui, row: &Row, y: f32, w: f32, actions: &mut Vec<Action>) {
         let row_w = w - 12.0;
+        // The remove button of an added folder sits on top of its row: it has to claim the
+        // mouse before the row does (the first click area under the cursor gets the press)
+        let remove_size = ROW_H - 4.0;
+        let remove_x = row_w - remove_size - 2.0;
+        let remove = row.is_root.then(|| {
+            nuon::click_area(("remove", &row.path))
+                .pos(remove_x, y + 2.0)
+                .size(remove_size, remove_size)
+                .build(ui)
+        });
         let ev = nuon::click_area(("row", &row.path))
             .pos(0.0, y)
             .size(row_w, ROW_H)
             .build(ui);
+        let remove_hot = remove.is_some_and(|r| r.is_hovered() || r.is_pressed());
+        let row_hot = ev.is_hovered() || ev.is_pressed() || remove_hot;
 
         let selected = self.selected.as_ref() == Some(&row.path);
         let bg = if selected && self.library_focused {
             Some(SELECTED_FOCUSED)
         } else if selected {
             Some(SELECTED)
-        } else if ev.is_hovered() || ev.is_pressed() {
+        } else if row_hot {
             Some(HOVER)
         } else {
             None
@@ -1194,11 +1225,8 @@ impl Workspace {
             .build(ui);
 
         let text_x = x + 20.0;
-        let remove_w = if row.is_root && ev.is_hovered() {
-            22.0
-        } else {
-            0.0
-        };
+        let show_remove = row.is_root && row_hot;
+        let remove_w = if show_remove { remove_size + 2.0 } else { 0.0 };
         let text_w = (row_w - text_x - 6.0 - remove_w).max(0.0);
         let name = if is_loading {
             format!("{} \u{2026}", row.name)
@@ -1216,20 +1244,27 @@ impl Workspace {
             .text_align(TextAlign::Center)
             .build(ui);
 
-        if remove_w > 0.0 {
-            let bx = row_w - remove_w - 2.0;
-            if icon_button(
-                ui,
-                ("remove", &row.path),
-                bx,
-                y + 2.0,
-                ROW_H - 4.0,
-                icon::CLOSE,
-                11.0,
-            ) {
-                actions.push(Action::RemoveRoot(row.path.clone()));
-                return;
+        if show_remove {
+            if remove_hot {
+                nuon::quad()
+                    .pos(remove_x, y + 2.0)
+                    .size(remove_size, remove_size)
+                    .color(SELECTED_FOCUSED)
+                    .border_radius([4.0; 4])
+                    .build(ui);
             }
+            nuon::label()
+                .icon(icon::CLOSE)
+                .pos(remove_x, y + 2.0)
+                .size(remove_size, remove_size)
+                .font_size(11.0)
+                .color(if remove_hot { TEXT } else { ICON })
+                .text_justify(TextAlign::Center)
+                .build(ui);
+        }
+        if remove.is_some_and(|r| r.is_clicked()) {
+            actions.push(Action::RemoveRoot(row.path.clone()));
+            return;
         }
 
         if ev.is_clicked() {
