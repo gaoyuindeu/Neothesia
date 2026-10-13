@@ -1,4 +1,69 @@
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+/// How long a cached port list is served before a background refresh is started.
+const PORT_CACHE_TTL: Duration = Duration::from_secs(1);
+
+/// Port list that is enumerated on a background thread.
+///
+/// On Windows with the WinRT backend every enumeration waits for the system, which
+/// takes several milliseconds and, for Bluetooth devices, can take much longer.
+/// The UI asks for the list every frame, so the last result is cached and refreshed
+/// at most once per [`PORT_CACHE_TTL`] without blocking the caller.
+struct PortCache<T> {
+    ports: Arc<Mutex<Vec<T>>>,
+    refreshing: Arc<AtomicBool>,
+    last_refresh: Mutex<Option<Instant>>,
+}
+
+impl<T: Clone + Send + 'static> PortCache<T> {
+    fn new() -> Self {
+        Self {
+            ports: Arc::new(Mutex::new(Vec::new())),
+            refreshing: Arc::new(AtomicBool::new(false)),
+            last_refresh: Mutex::new(None),
+        }
+    }
+
+    fn get(&self, enumerate: fn() -> Vec<T>) -> Vec<T> {
+        let mut last = self.last_refresh.lock().unwrap();
+        match *last {
+            // First call: enumerate synchronously so the caller gets a real list
+            // (the settings auto-select the first port on startup).
+            None => {
+                let ports = enumerate();
+                *self.ports.lock().unwrap() = ports.clone();
+                *last = Some(Instant::now());
+                ports
+            }
+            Some(t) => {
+                if t.elapsed() > PORT_CACHE_TTL
+                    && self
+                        .refreshing
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    *last = Some(Instant::now());
+                    let ports = self.ports.clone();
+                    let refreshing = self.refreshing.clone();
+                    std::thread::spawn(move || {
+                        let fresh = enumerate();
+                        *ports.lock().unwrap() = fresh;
+                        refreshing.store(false, Ordering::Release);
+                    });
+                }
+                self.ports.lock().unwrap().clone()
+            }
+        }
+    }
+}
 
 /// An error that can occur during initialization (i.e., while
 /// creating a `MidiInput` or `MidiOutput` object).
@@ -20,23 +85,34 @@ impl From<midir::InitError> for InitError {
 }
 
 pub struct MidiOutputManager {
-    output: midir::MidiOutput,
+    cache: PortCache<MidiOutputPort>,
 }
 
 impl MidiOutputManager {
     pub fn new() -> Result<Self, InitError> {
-        let output = midir::MidiOutput::new("MidiIo-out-manager")?;
+        // Fail early if MIDI cannot be initialized at all
+        midir::MidiOutput::new("MidiIo-out-manager")?;
 
-        Ok(Self { output })
+        Ok(Self {
+            cache: PortCache::new(),
+        })
     }
 
-    pub fn outputs(&self) -> Vec<MidiOutputPort> {
-        self.output
+    fn enumerate() -> Vec<MidiOutputPort> {
+        let Ok(output) = midir::MidiOutput::new("MidiIo-out-enum") else {
+            return Vec::new();
+        };
+        output
             .ports()
             .iter()
-            .filter_map(|p| self.output.port_name(p).ok())
+            .filter_map(|p| output.port_name(p).ok())
             .map(MidiOutputPort)
             .collect()
+    }
+
+    /// Known output ports; served from a cache that is refreshed in the background.
+    pub fn outputs(&self) -> Vec<MidiOutputPort> {
+        self.cache.get(Self::enumerate)
     }
 
     pub fn connect_output(port: MidiOutputPort) -> Option<MidiOutputConnection> {
@@ -56,23 +132,34 @@ impl MidiOutputManager {
 }
 
 pub struct MidiInputManager {
-    input: midir::MidiInput,
+    cache: PortCache<MidiInputPort>,
 }
 
 impl MidiInputManager {
     pub fn new() -> Result<Self, InitError> {
-        let input = midir::MidiInput::new("MidiIo-in-manager")?;
+        // Fail early if MIDI cannot be initialized at all
+        midir::MidiInput::new("MidiIo-in-manager")?;
 
-        Ok(Self { input })
+        Ok(Self {
+            cache: PortCache::new(),
+        })
     }
 
-    pub fn inputs(&self) -> Vec<MidiInputPort> {
-        self.input
+    fn enumerate() -> Vec<MidiInputPort> {
+        let Ok(input) = midir::MidiInput::new("MidiIo-in-enum") else {
+            return Vec::new();
+        };
+        input
             .ports()
             .iter()
-            .filter_map(|p| self.input.port_name(p).ok())
+            .filter_map(|p| input.port_name(p).ok())
             .map(MidiInputPort)
             .collect()
+    }
+
+    /// Known input ports; served from a cache that is refreshed in the background.
+    pub fn inputs(&self) -> Vec<MidiInputPort> {
+        self.cache.get(Self::enumerate)
     }
 
     pub fn connect_input<F>(

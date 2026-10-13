@@ -275,6 +275,7 @@ impl Neothesia {
         #[cfg(debug_assertions)]
         self.context.fps_ticker.tick();
 
+        self.context.input_manager.poll();
         self.workspace.update(&mut self.context, delta);
     }
 
